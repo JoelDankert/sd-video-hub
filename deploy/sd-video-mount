@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+mode=${1:-mount}
+dev_arg=${2:-}
+if [ "$mode" = "--unmount" ]; then
+  dev="/dev/$dev_arg"
+  uuid=$(blkid -s UUID -o value "$dev" 2>/dev/null || true)
+  [ -n "$uuid" ] || exit 0
+  mp="/mnt/sd-video-$uuid"
+  mountpoint -q "$mp" && umount "$mp" || true
+  exit 0
+fi
+dev="/dev/$mode"
+[ -b "$dev" ] || exit 0
+uuid=$(blkid -s UUID -o value "$dev" 2>/dev/null || true)
+[ -n "$uuid" ] || exit 0
+mp="/mnt/sd-video-$uuid"
+mkdir -p "$mp"
+mountpoint -q "$mp" || mount -o uid=1000,gid=100,umask=022,users,nofail "$dev" "$mp"

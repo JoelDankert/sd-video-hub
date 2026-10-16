@@ -1,0 +1,20 @@
+# Vorlage für einen systemd-Benutzerdienst, nicht automatisch installiert.
+# ACHTUNG: Start aktiviert Kartenimport und automatische Quellenlöschung!
+# Nur dedizierte, entbehrliche oder gesicherte Karten anschließen.
+# EnvironmentFile lokal anlegen und nur für das Betriebskonto lesbar halten.
+# Dort SDH_PASSWORD setzen; kein Passwort ins Repository übernehmen.
+[Unit]
+Description=SD Video Hub (automatic destructive card import)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/apps/sd-video-hub
+EnvironmentFile=%h/.config/sd-video-hub/env
+ExecStart=/usr/bin/python3 %h/apps/sd-video-hub/app.py --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

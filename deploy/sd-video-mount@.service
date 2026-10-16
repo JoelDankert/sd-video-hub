@@ -1,0 +1,10 @@
+[Unit]
+Description=Mount USB SD card for SD Video Hub (%I)
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sd-video-mount %I
+ExecStop=/usr/local/sbin/sd-video-mount --unmount %I

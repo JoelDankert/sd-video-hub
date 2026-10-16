@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "playback": {
+    "sound_enabled": true,
+    "skip_nonflight": true,
+    "crop_4_3": false,
+    "muted_video_ids": []
+  },
+  "archive": {
+    "sort_by": "id",
+    "sort_direction": "desc",
+    "group_order": [
+      "hdzero",
+      "pict_new",
+      "pict_old"
+    ]
+  },
+  "detection": {
+    "enabled": true,
+    "default_font": "impact_mini",
+    "sample_seconds": 2,
+    "strong_score": 0.78,
+    "weak_score": 0.7,
+    "confirmation_seconds": 4,
+    "support_seconds": 15,
+    "position_tolerance_pixels": 5,
+    "min_flight_seconds": 5,
+    "frame_width": 480,
+    "frame_height": 270,
+    "vertical_scales": [
+      0.8,
+      0.9
+    ],
+    "analog_horizontal_scale": 1.3333333333333333,
+    "digital_horizontal_scale": 1.0,
+    "words": [
+      "DISARMED",
+      "MENU",
+      "STATS"
+    ],
+    "classifier": "coarse_to_fine_v2",
+    "candidate_floor": 0.4,
+    "candidate_peaks": 8,
+    "single_hit_score": 0.78,
+    "letter_min_score": 0.15,
+    "letter_good_score": 0.45,
+    "letter_good_fraction": 0.75,
+    "letter_mean_score": 0.65
+  },
+  "downloads": {
+    "temporary_ttl_seconds": 3600,
+    "max_pending": 3,
+    "encode_timeout_seconds": 3600,
+    "preset": "veryfast",
+    "crf": 20,
+    "threads": 2
+  },
+  "fonts": {
+    "impact_mini": {
+      "file": "assets/impact_mini.mcm",
+      "detection_enabled": true,
+      "source": "https://raw.githubusercontent.com/betaflight/betaflight-configurator/master/resources/osd/1/impact_mini.mcm"
+    },
+    "clarity": {
+      "file": "assets/clarity.mcm",
+      "detection_enabled": true,
+      "source": "https://raw.githubusercontent.com/betaflight/betaflight-configurator/master/resources/osd/1/clarity.mcm"
+    },
+    "default": {
+      "file": "assets/default.mcm",
+      "detection_enabled": true,
+      "source": "https://raw.githubusercontent.com/betaflight/betaflight-configurator/master/resources/osd/1/default.mcm"
+    }
+  },
+  "video_rules": []
+}

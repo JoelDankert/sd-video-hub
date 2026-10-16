@@ -1,0 +1,5 @@
+# Nur für .venv-template; das Backend verwendet die Standardbibliothek.
+# Pillow wird im aktuellen Produktionsdetektor nicht verwendet.
+# Nicht gepinnt: keine vollständig reproduzierbare/neu getestete Umgebung zugesichert.
+opencv-python-headless
+numpy
