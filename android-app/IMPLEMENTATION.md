@@ -61,6 +61,20 @@ python3 -m unittest test_offline_manifest.py
   preferred loopback port avoid overlapping cookie sessions and unnecessary Web storage
   origin changes. A separate server origin does not overwrite the legacy server cache.
 
+## Native downloads and settings
+
+Version 1.2 captures trusted loopback download anchors at document start, before
+WebView can consume one-time export URLs. Foreground WorkManager jobs copy complete
+cached normal videos when possible and otherwise fetch the authenticated upstream
+resource without following redirects. Android 29+ publishes through a pending
+MediaStore row in `Downloads/SD Video Hub`; Android 26–28 uses the system document
+picker. Failed partial MediaStore rows are removed.
+
+Crop and skip values are mirrored synchronously into native preferences scoped by
+upstream server and username. Document-start bootstrap restores exact `true`/`false`
+strings before site defaults and migrates existing values from the current loopback
+origin. Credentials are absent from JavaScript and WorkManager input.
+
 ## Limits and evidence
 
 A first online synchronization is necessary before content can exist offline. Partial
@@ -73,3 +87,11 @@ See [RELIABILITY.md](RELIABILITY.md) for actual HTTP, browser playback, thumbnai
 legacy migration, concurrency and signing checks. Those desktop integration tests do not
 replace physical Android WebView, Activity lifecycle, notification or fullscreen tests.
 Icon attribution: [licenses/ICON-LICENSE.md](licenses/ICON-LICENSE.md).
+
+Focused verification for 1.2: `NativeDownloadTest` (5 cases) and
+`DownloadSettingsTest` (2 cases, executing the bootstrap in Node) pass, as does
+`assembleDebug`; the APK signature matches the previous release. The settings
+bootstrap reads fresh native preferences on each navigation and handles stale or
+unavailable localStorage. It requires document-start script support in Android
+System WebView. MediaStore, SAF and real app-restart behavior still need device
+testing; no physical Android test was performed for this build.

@@ -25,7 +25,7 @@ class OfflineCache(context: Context) {
     private val legacyOrigin = identity.getString("legacy-origin", null)
     private val cacheRoot = when {
         cacheIdentity == null || legacyOrigin == null || legacyOrigin == cacheIdentity -> File(context.filesDir, "offline-cache")
-        else -> File(context.filesDir, "offline-cache-${originKey(cacheIdentity)}")
+        else -> File(context.filesDir, "offline-cache-${identityKey(cacheIdentity)}")
     }
     init {
         if (cacheIdentity != null && legacyOrigin == null) identity.edit().putString("legacy-origin", cacheIdentity).apply()
@@ -37,9 +37,11 @@ class OfflineCache(context: Context) {
     fun install(entry: ManifestEntry, temporary: File) = repository.install(entry, temporary)
     fun prune(valid: Set<String>) = repository.prune(valid)
 
-    private fun originKey(value: String): String {
+    companion object {
+    fun identityKey(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.trimEnd('/').toByteArray(StandardCharsets.UTF_8))
         return digest.take(8).joinToString("") { "%02x".format(it) }
+    }
     }
 }
 
