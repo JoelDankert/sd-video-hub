@@ -8,6 +8,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
+import java.io.ByteArrayInputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -23,6 +24,11 @@ class OfflineCache(context: Context) {
     private fun name(url: String) = MessageDigest.getInstance("SHA-256").digest(url.toByteArray()).joinToString("") { "%02x".format(it) }
     fun file(url: String) = File(root, name(url))
     fun versions() = index().mapValues { it.value.first }
+    fun isComplete(url: String): Boolean {
+        val cacheUrl = if (index().containsKey(url)) url else url.substringBefore('?')
+        return index().containsKey(cacheUrl) && file(cacheUrl).isFile
+    }
+    fun completeUrls(): Set<String> = index().keys.filterTo(linkedSetOf()) { file(it).isFile }
 
     @Synchronized fun install(entry: ManifestEntry, temporary: File) {
         require(temporary.length() == entry.size) { "Size mismatch for ${entry.url}" }
@@ -44,6 +50,15 @@ class OfflineCache(context: Context) {
         val cacheUrl = if (data.containsKey(url)) url else url.substringBefore('?')
         val metadata = data[cacheUrl] ?: return null
         val source = file(cacheUrl); if (!source.isFile) return null
+        if (cacheUrl == "/api/state" && rangeHeader.isNullOrBlank()) {
+            val body = try {
+                CachedStateFilter.filter(source.readText(), completeUrls()).toByteArray()
+            } catch (_: Exception) { return null }
+            return WebResourceResponse(
+                "application/json", "UTF-8", 200, "OK",
+                mapOf("Content-Length" to body.size.toString()), ByteArrayInputStream(body),
+            )
+        }
         val range = try { RangeLogic.parse(rangeHeader, source.length()) } catch (_: Exception) {
             return WebResourceResponse("text/plain", "UTF-8", 416, "Range Not Satisfiable", mapOf("Content-Range" to "bytes */${source.length()}"), InputStream.nullInputStream())
         }

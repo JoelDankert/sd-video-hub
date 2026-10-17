@@ -15,8 +15,22 @@
   broadcasts, Android 13 notification permission handling, and retry-on-open behavior.
 - Extracted deterministic manifest/cache planning and added JVM coverage for changed,
   new, unchanged, and stale entries.
+- Made offline login and WebView routing use Android's validated-network state, filtered
+  cached state to complete media, and left uncached online streams to native WebView.
+- Made foreground-sync requests pending-before-start and redeliverable, retained pending
+  state on failures, cleared it on success, and declared `stopWithTask=false`.
+- Added trusted same-origin viewer-only Back handling for legacy and Android 13+ APIs;
+  Back at the site root now keeps the Activity open.
+- Added JVM coverage for representative cached-state filtering and stream/cache routing.
 
 ## Verification (2026-10-17)
+
+- `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks
+  (7 executed, 34 up-to-date) after the final offline routing, sync durability, and Back review.
+- JVM result: **11 tests, 0 failures, 0 errors**. Updated debug APK SHA-256:
+  `4ded767d80e71bafd0c303a60c4345da091a3987994575a7f608d48632608441`.
+- The intentional tests-first run failed at test compilation because
+  `CachedStateFilter`, `RequestRouting`, and `RequestRoute` had not yet been implemented.
 
 - `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks
   (8 executed, 33 up-to-date) after the final foreground-sync changes.

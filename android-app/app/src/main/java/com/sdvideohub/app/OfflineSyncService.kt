@@ -26,10 +26,10 @@ class OfflineSyncService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         enterForeground("Preparing offline sync…", 0, 0)
-        if (!running.compareAndSet(false, true)) return START_NOT_STICKY
+        if (!running.compareAndSet(false, true)) return START_REDELIVER_INTENT
         publish(STATE_RUNNING, "Preparing offline sync…")
         executor.execute { synchronize() }
-        return START_NOT_STICKY
+        return START_REDELIVER_INTENT
     }
 
     private fun synchronize() {
@@ -51,6 +51,7 @@ class OfflineSyncService : Service() {
             }
             // Deletions are committed only after every replacement is safely installed.
             cache.prune(plan.validUrls)
+            setPending(false)
             publish(STATE_SUCCESS, if (total == 0) "Up to date" else "Offline copy updated")
         } catch (_: MissingCredentialsException) {
             publish(STATE_FAILURE, "Sync skipped · sign in required")
@@ -138,6 +139,11 @@ class OfflineSyncService : Service() {
             .putExtra(EXTRA_STATE, state).putExtra(EXTRA_MESSAGE, message))
     }
 
+    private fun setPending(value: Boolean) {
+        getSharedPreferences(STATUS_PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_PENDING, value).commit()
+    }
+
     override fun onDestroy() {
         executor.shutdownNow()
         super.onDestroy()
@@ -157,11 +163,14 @@ class OfflineSyncService : Service() {
         const val STATUS_PREFERENCES = "offline-sync-status"
         const val KEY_STATE = "state"
         const val KEY_MESSAGE = "message"
+        const val KEY_PENDING = "pending"
         private const val CHANNEL_ID = "offline-sync"
         private const val NOTIFICATION_ID = 41
         private val running = AtomicBoolean(false)
 
         fun start(context: Context) {
+            context.getSharedPreferences(STATUS_PREFERENCES, Context.MODE_PRIVATE).edit()
+                .putBoolean(KEY_PENDING, true).commit()
             androidx.core.content.ContextCompat.startForegroundService(
                 context, Intent(context, OfflineSyncService::class.java),
             )

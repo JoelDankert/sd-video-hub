@@ -31,6 +31,33 @@ object SyncPlanner {
     }
 }
 
+object CachedStateFilter {
+    fun filter(text: String, completeUrls: Set<String>): String {
+        val root = JSONObject(text)
+        val files = root.optJSONArray("files") ?: return root.toString()
+        val filtered = org.json.JSONArray()
+        for (index in 0 until files.length()) {
+            val file = files.optJSONObject(index) ?: continue
+            val videoUrl = file.optString("video_url")
+            if (videoUrl.isNotBlank() && completeUrls.contains(videoUrl)) filtered.put(file)
+        }
+        root.put("files", filtered)
+        return root.toString()
+    }
+}
+
+enum class RequestRoute { NATIVE, CACHE_ONLY, NETWORK_THEN_CACHE }
+
+object RequestRouting {
+    fun select(path: String, networkValidated: Boolean, cached: Boolean): RequestRoute {
+        if (!networkValidated) return RequestRoute.CACHE_ONLY
+        val pathname = path.substringBefore('?')
+        val isNativeStreamOrDownload = pathname.startsWith("/media/") ||
+            pathname.startsWith("/flight-download/") || path.substringAfter('?', "") == "download"
+        return if (isNativeStreamOrDownload && !cached) RequestRoute.NATIVE else RequestRoute.NETWORK_THEN_CACHE
+    }
+}
+
 data class ByteRange(val start: Long, val endInclusive: Long) {
     val length get() = endInclusive - start + 1
 }

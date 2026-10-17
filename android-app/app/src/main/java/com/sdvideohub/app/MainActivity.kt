@@ -10,10 +10,14 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.webkit.HttpAuthHandler
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -37,6 +41,9 @@ class MainActivity : Activity() {
     private lateinit var cache: OfflineCache
     private lateinit var root: FrameLayout
     private lateinit var status: TextView
+    private var webView: WebView? = null
+    private var modernBackRegistered = false
+    private val modernBackCallback = if (Build.VERSION.SDK_INT >= 33) OnBackInvokedCallback { handleWebBack() } else null
     private var receiverRegistered = false
     private val syncStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -48,7 +55,7 @@ class MainActivity : Activity() {
         super.onCreate(state); secure = SecureCredentials(this); cache = OfflineCache(this)
         val saved = secure.load()
         showLogin(saved)
-        if (saved != null) OfflineSyncService.start(this)
+        if (saved != null && hasValidatedNetwork()) OfflineSyncService.start(this)
     }
 
     private fun field(hint: String, value: String = "") = EditText(this).apply {
@@ -71,6 +78,11 @@ class MainActivity : Activity() {
                 status.text = "Enter a valid http(s) server URL"; status.visibility = View.VISIBLE; return@setOnClickListener
             }
             login.isEnabled = false; status.text = "Signing in…"; status.visibility = View.VISIBLE
+            if (saved == credentials && cache.isComplete("/") && !hasValidatedNetwork()) {
+                showWeb(credentials)
+                statusText("Offline copy")
+                return@setOnClickListener
+            }
             worker.execute {
                 try {
                     fetchManifest(credentials)
@@ -100,6 +112,7 @@ class MainActivity : Activity() {
             webChromeClient = WebChromeClient()
             webViewClient = CacheClient(credentials)
         }
+        webView = web
         root.addView(web, FrameLayout.LayoutParams(-1, -1))
         status = TextView(this).apply { setTextColor(Color.WHITE); setBackgroundColor(0xB0000000.toInt()); setPadding(18, 10, 18, 10); textSize = 12f }
         val statusMargin = (12 * resources.displayMetrics.density).toInt()
@@ -114,6 +127,7 @@ class MainActivity : Activity() {
             insets
         }
         setContentView(root)
+        registerModernBackCallback()
         web.loadUrl(credentials.baseUrl + "/", mapOf("Authorization" to Network.authorization(credentials)))
     }
 
@@ -162,6 +176,11 @@ class MainActivity : Activity() {
             if (uri.scheme != base.scheme || uri.host != base.host || effectivePort(uri) != effectivePort(base)) return null
             val path = uri.encodedPath + (uri.encodedQuery?.let { "?$it" } ?: "")
             val range = request.requestHeaders.entries.firstOrNull { it.key.equals("Range", true) }?.value
+            when (RequestRouting.select(path, hasValidatedNetwork(), cache.isComplete(path))) {
+                RequestRoute.NATIVE -> return null
+                RequestRoute.CACHE_ONLY -> return cache.response(path, range)
+                RequestRoute.NETWORK_THEN_CACHE -> Unit
+            }
             try {
                 val connection = Network.open(credentials.baseUrl, path, credentials, range)
                 val code = connection.responseCode
@@ -180,6 +199,7 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        registerModernBackCallback()
         if (!receiverRegistered) {
             ContextCompat.registerReceiver(
                 this, syncStatusReceiver, IntentFilter(OfflineSyncService.ACTION_STATUS),
@@ -192,6 +212,7 @@ class MainActivity : Activity() {
     }
 
     override fun onStop() {
+        unregisterModernBackCallback()
         if (receiverRegistered) {
             unregisterReceiver(syncStatusReceiver)
             receiverRegistered = false
@@ -200,6 +221,49 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() { worker.shutdownNow(); super.onDestroy() }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (webView == null) super.onBackPressed() else handleWebBack()
+    }
+
+    private fun handleWebBack() {
+        val web = webView ?: return
+        val current = web.url?.let(Uri::parse)
+        val expected = secure.load()?.baseUrl?.let(Uri::parse)
+        val trusted = current != null && expected != null && current.scheme == expected.scheme &&
+            current.host == expected.host && effectivePort(current) == effectivePort(expected)
+        if (!trusted) return
+        web.evaluateJavascript(
+            "(()=>{const v=document.getElementById('viewer');if(v&&!v.hidden&&typeof closeViewer==='function'){closeViewer();return true}return false})()",
+            null,
+        )
+        // Both a visible viewer and the site root consume Back; the Activity stays open.
+    }
+
+    private fun registerModernBackCallback() {
+        if (Build.VERSION.SDK_INT >= 33 && webView != null && !modernBackRegistered) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT, modernBackCallback!!,
+            )
+            modernBackRegistered = true
+        }
+    }
+
+    private fun unregisterModernBackCallback() {
+        if (Build.VERSION.SDK_INT >= 33 && modernBackRegistered) {
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(modernBackCallback!!)
+            modernBackRegistered = false
+        }
+    }
+
+    private fun hasValidatedNetwork(): Boolean {
+        val manager = getSystemService(ConnectivityManager::class.java)
+        val network = manager.activeNetwork ?: return false
+        return manager.getNetworkCapabilities(network)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+    }
+
+    private fun effectivePort(uri: Uri) = if (uri.port != -1) uri.port else if (uri.scheme == "https") 443 else 80
 
     companion object {
         private const val NOTIFICATION_PERMISSION_REQUEST = 701
