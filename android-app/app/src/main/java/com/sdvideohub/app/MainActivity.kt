@@ -27,6 +27,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Observer
@@ -43,6 +44,10 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private var webView: WebView? = null
     private var cacheClient: CacheClient? = null
+    private var customView: View? = null
+    private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+    private var systemUiBeforeFullscreen: SystemUiState? = null
+    private val fullscreenSession = FullscreenSessionState()
     private val activeSyncIds = mutableSetOf<String>()
     private var modernBackRegistered = false
     private val modernBackCallback = if (Build.VERSION.SDK_INT >= 33) OnBackInvokedCallback { handleWebBack() } else null
@@ -137,7 +142,32 @@ class MainActivity : Activity() {
         root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val web = WebView(this).apply {
             settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.mediaPlaybackRequiresUserGesture = false
-            webChromeClient = WebChromeClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                    if (view == null || callback == null || !fullscreenSession.begin()) {
+                        callback?.onCustomViewHidden()
+                        return
+                    }
+                    val insets = ViewCompat.getRootWindowInsets(window.decorView)
+                    systemUiBeforeFullscreen = SystemUiState(
+                        statusBarsVisible = insets?.isVisible(WindowInsetsCompat.Type.statusBars()) ?: true,
+                        navigationBarsVisible = insets?.isVisible(WindowInsetsCompat.Type.navigationBars()) ?: true,
+                        behavior = WindowCompat.getInsetsController(window, window.decorView).systemBarsBehavior,
+                    )
+                    customView = view
+                    customViewCallback = callback
+                    view.setBackgroundColor(Color.BLACK)
+                    root.addView(view, FrameLayout.LayoutParams(-1, -1))
+                    WindowCompat.getInsetsController(window, window.decorView).apply {
+                        systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                        hide(WindowInsetsCompat.Type.systemBars())
+                    }
+                }
+
+                override fun onHideCustomView() {
+                    hideCustomView()
+                }
+            }
             val client = CacheClient(credentials, forceCache, enqueueAfterVisible = forceCache)
             cacheClient = client
             webViewClient = client
@@ -268,6 +298,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        hideCustomView()
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData(OfflineSyncWorker.UNIQUE_WORK_NAME)
             .removeObserver(syncObserver)
         worker.shutdownNow()
@@ -280,6 +311,10 @@ class MainActivity : Activity() {
     }
 
     private fun handleWebBack() {
+        if (fullscreenSession.isActive) {
+            hideCustomView()
+            return
+        }
         val web = webView ?: return
         val current = web.url?.let(Uri::parse)
         val expected = secure.load()?.baseUrl?.let(Uri::parse)
@@ -291,6 +326,19 @@ class MainActivity : Activity() {
             null,
         )
         // Both a visible viewer and the site root consume Back; the Activity stays open.
+    }
+
+    private fun hideCustomView() {
+        if (!fullscreenSession.end()) return
+        val view = customView
+        val callback = customViewCallback
+        val previousUi = systemUiBeforeFullscreen
+        customView = null
+        customViewCallback = null
+        systemUiBeforeFullscreen = null
+        if (view?.parent === root) root.removeView(view)
+        previousUi?.restore(WindowCompat.getInsetsController(window, window.decorView))
+        callback?.onCustomViewHidden()
     }
 
     private fun registerModernBackCallback() {

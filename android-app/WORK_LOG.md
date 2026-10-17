@@ -2,6 +2,16 @@
 
 ## Completed
 
+- Added Android WebView HTML5 video fullscreen support using the standard
+  `WebChromeClient` custom-view contract. The site's existing video view is layered over
+  the Activity root, system bars become transient-swipe immersive, and their independent
+  prior visibility plus controller behavior are restored on exit. Back exits native
+  fullscreen before retaining the existing trusted viewer-close/root-consume behavior,
+  and guarded session state ensures each custom-view callback is completed once.
+- Added focused JVM coverage for rejecting overlapping fullscreen sessions and making
+  fullscreen exit idempotent. The site video markup remains the existing single
+  `controls playsinline` player; server and cache routing were unchanged.
+
 - Fixed legacy cache-index migration so an existing hashed cache file supplies its
   actual byte length as the runtime expected size. Cached shell/state can render
   immediately after upgrade, while manifest planning still redownloads same-version
@@ -52,6 +62,12 @@
 - Added JVM coverage for representative cached-state filtering and stream/cache routing.
 
 ## Verification (2026-10-17)
+
+- `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks
+  (8 executed, 33 up-to-date) in 15s for WebView native video fullscreen support.
+  JVM result: **20 tests, 0 failures, 0 errors**. Debug APK: 5,343,790 bytes,
+  SHA-256 `ec92d08e05102edb9e9ab12caa8c93f054fc8f6324d862a1b5a4724a49801d03`.
+  Gradle reported only the existing deprecation warnings.
 
 - `./gradlew --no-daemon testDebugUnitTest --tests com.sdvideohub.app.CacheIndexStoreTest
   --tests com.sdvideohub.app.SyncPlannerTest`: **passed** after the legacy-file
