@@ -21,11 +21,24 @@ object ManifestCodec {
 
 data class SyncPlan(val downloads: List<ManifestEntry>, val validUrls: Set<String>)
 
+data class CacheRecord(
+    val version: String,
+    val mime: String,
+    val expectedSize: Long?,
+    val actualSize: Long?,
+) {
+    fun isComplete(): Boolean = expectedSize != null && actualSize == expectedSize
+}
+
 object SyncPlanner {
-    fun plan(local: Map<String, String>, remote: List<ManifestEntry>): SyncPlan {
+    fun plan(local: Map<String, CacheRecord>, remote: List<ManifestEntry>): SyncPlan {
         val remoteUrls = remote.mapTo(linkedSetOf()) { it.url }
         return SyncPlan(
-            downloads = remote.filter { local[it.url] != it.version },
+            downloads = remote.filter { entry ->
+                val cached = local[entry.url]
+                cached == null || cached.version != entry.version ||
+                    cached.expectedSize != entry.size || cached.actualSize != entry.size
+            },
             validUrls = remoteUrls,
         )
     }
@@ -49,17 +62,31 @@ object CachedStateFilter {
 enum class RequestRoute { NATIVE, CACHE_ONLY, NETWORK_THEN_CACHE }
 
 object RequestRouting {
-    fun select(path: String, networkValidated: Boolean, cached: Boolean): RequestRoute {
+    fun select(path: String, networkValidated: Boolean, cached: Boolean, forceCache: Boolean = false): RequestRoute {
         val pathname = path.substringBefore('?')
         if (pathname.startsWith("/media/")) {
             if (cached) return RequestRoute.CACHE_ONLY
             return if (networkValidated) RequestRoute.NATIVE else RequestRoute.CACHE_ONLY
         }
+        if (forceCache && cached) return RequestRoute.CACHE_ONLY
         if (!networkValidated) return RequestRoute.CACHE_ONLY
         val isNativeDownload = pathname.startsWith("/flight-download/") ||
             path.substringAfter('?', "") == "download"
         return if (isNativeDownload) RequestRoute.NATIVE else RequestRoute.NETWORK_THEN_CACHE
     }
+}
+
+enum class SyncWorkState { ENQUEUED, RUNNING, BLOCKED, SUCCEEDED, FAILED, CANCELLED }
+
+data class SyncWorkSnapshot(val id: String, val state: SyncWorkState)
+
+object SyncWorkSelector {
+    private val active = setOf(SyncWorkState.ENQUEUED, SyncWorkState.RUNNING, SyncWorkState.BLOCKED)
+
+    fun select(work: List<SyncWorkSnapshot>, previouslyActiveIds: Set<String> = emptySet()): SyncWorkSnapshot? =
+        work.firstOrNull { it.state in active }
+            ?: work.firstOrNull { it.id in previouslyActiveIds }
+            ?: work.firstOrNull()
 }
 
 data class ByteRange(val start: Long, val endInclusive: Long) {

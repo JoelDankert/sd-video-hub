@@ -2,6 +2,28 @@
 
 ## Completed
 
+- Fixed legacy cache-index migration so an existing hashed cache file supplies its
+  actual byte length as the runtime expected size. Cached shell/state can render
+  immediately after upgrade, while manifest planning still redownloads same-version
+  entries when the remote byte size differs and never treats a missing file as complete.
+
+- Corrected saved-login startup to render a complete cached root/state immediately and
+  defer new sync enqueueing until that page is visibly committed. Cache-first sessions
+  now serve every verified local resource while online, then reload from cache after a
+  successful independent WorkManager run.
+- Added expected byte size to durable cache records with safe legacy parsing. Cache
+  completeness and sync planning now require matching version, manifest size, and exact
+  on-disk length; a missing/wrong-size file can no longer produce `Up to date`.
+- Made active unique work outrank stale completed history, with terminal status accepted
+  only for a run observed active in this Activity. Foreground progress announces the
+  actual `Syncing N item(s)` after the remote plan is known.
+- Preloaded WebView HTTP-auth credentials for the configured host and `SD Video Hub`
+  realm while retaining the matching auth callback. Verified routing keeps complete
+  media local even online and leaves uncached online media to native WebView streaming.
+- Added unit coverage for byte-size planning/migration, cache-first routes, and active
+  WorkInfo selection. Existing cached-state filtering and Back viewer-close behavior
+  remain intact.
+
 - Replaced the custom `OfflineSyncService`/broadcast/pending-flag model with a unique
   persisted WorkManager job using `KEEP`, connected-network constraints, foreground
   `dataSync` execution only while running, observable progress, and exponential retry.
@@ -30,6 +52,23 @@
 - Added JVM coverage for representative cached-state filtering and stream/cache routing.
 
 ## Verification (2026-10-17)
+
+- `./gradlew --no-daemon testDebugUnitTest --tests com.sdvideohub.app.CacheIndexStoreTest
+  --tests com.sdvideohub.app.SyncPlannerTest`: **passed** after the legacy-file
+  effective-size regression fix.
+- `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks
+  (2 executed, 39 up-to-date) in 11s. JVM result: **18 tests, 0 failures, 0 errors**.
+  Debug APK: 5,343,790 bytes, SHA-256
+  `ec673119dc7634a8f184000d3a0f76b8db65d6a12c6808a01cff49c255093701`.
+  Gradle reported only the existing deprecation warning.
+
+- `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks
+  (8 executed, 33 up-to-date) in 15s after the final corrective cache/auth/status pass.
+  JVM result: **18 tests, 0 failures, 0 errors**. Debug APK: 5,343,790 bytes,
+  SHA-256 `0c0faaadf2ca9ae3fc15d91cbfc55735fc677626778eb407ea7c7ceb83da9787`.
+  Gradle reported only the existing API/Gradle deprecation warnings.
+- `adb devices -l` returned no attached devices. No connected physical-device install,
+  launch, login, streaming, or Back-navigation test was possible.
 
 - `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks
   (7 executed, 34 up-to-date) in 13s for the final WorkManager/cache durability revision.

@@ -43,22 +43,30 @@ python3 -m unittest test_offline_manifest.py
   notification. Android 13+ notification permission controls notification-drawer
   visibility, not whether WorkManager can schedule the job.
 - Sync writes resources into app-private storage via temporary files and publishes each
-  entry atomically. The cache index is fsynced and rotated through a last-known-good
-  backup; a corrupt/missing primary recovers from that backup. Planning trusts an index
-  entry only when its content file exists. Stale entries are removed only after every
+  entry atomically. The cache index persists version, MIME type, and expected byte size,
+  is fsynced, and rotates through a last-known-good backup. A corrupt/missing primary
+  recovers from that backup. Legacy records without size remain readable but are treated
+  as incomplete and refreshed. Planning trusts an entry only when its version and stored
+  expected size match the manifest and its file has exactly that byte length. Stale
+  entries are removed only after every
   replacement has downloaded, and temporary failures never delete completed cache data.
-- With a validated active Android network, same-origin document/API GETs prefer the
-  authenticated server and fall back to cache. Without one, GETs go directly to cache;
-  there is no timeout or fixed delay. If saved credentials and a complete cached root
-  exist, Login opens it immediately without manifest I/O. Android's validated-network
-  signal can still lag unusual captive-portal or VPN transitions.
+- If saved matching credentials plus complete cached root and state exist, the WebView
+  renders the cached root before the Activity enqueues any new hub work. That session is
+  cache-first regardless of connectivity: every complete cached root, state, thumbnail,
+  cut-list, and media response remains local. Missing ordinary resources can use the
+  authenticated network when Android reports validated connectivity; missing online
+  media remains native WebView traffic. After a successful background sync, the WebView
+  switches/reloads in cache-first mode so newly installed entries appear. A new login
+  without a usable cached shell still validates online normally.
 - Cached `/api/state` responses retain the original top-level state but filter `files`
   to entries whose `video_url` has an atomically installed cache entry. Partial `.part`
   downloads and missing media therefore do not create offline cards.
 - Cached `/media/` requests always use the local cache, including while online. Online
   uncached `/media/` and generated `/flight-download/` requests are left directly to the
-  native WebView pipeline (including its Basic-auth callback) and never wrapped in a
-  `WebResourceResponse`. Offline cached byte ranges produce `206`,
+  native WebView pipeline and never wrapped in a `WebResourceResponse`. Before the site
+  loads, WebView stores the username/password for the exact configured host and realm
+  `SD Video Hub`; the matching HTTP-auth callback is retained for native requests.
+  Offline cached byte ranges produce `206`,
   `Content-Range`, and a bounded stream, so synchronized video remains seekable.
 - A first successful online login/sync is required before offline use. Successful login
   stores credentials and enqueues (or observes) the unique job; opening the app with
@@ -77,6 +85,9 @@ python3 -m unittest test_offline_manifest.py
 - While the trusted same-origin site is displayed, legacy Back and Android 13+
   predictive Back call the site's existing `closeViewer()` only when `#viewer` is
   visible. Back at the site root is consumed and does not finish the Activity.
+- Work status selection always prefers `ENQUEUED`, `RUNNING`, or `BLOCKED` unique work
+  over historical terminal records. Only a currently observed run can report completion;
+  `Up to date` is emitted only after its size-verified plan contains zero downloads.
 
 Launcher icon attribution is in `licenses/ICON-LICENSE.md`; all artwork is bundled and
 the app performs no runtime icon download.

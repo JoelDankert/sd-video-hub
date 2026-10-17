@@ -23,4 +23,12 @@ class RequestRoutingTest {
     @Test fun onlineDocumentsUseNetworkWithCacheFallback() {
         assertEquals(RequestRoute.NETWORK_THEN_CACHE, RequestRouting.select("/api/state", true, true))
     }
+
+    @Test fun cacheFirstSessionUsesEveryCompleteLocalResource() {
+        assertEquals(RequestRoute.CACHE_ONLY, RequestRouting.select("/", true, true, forceCache = true))
+        assertEquals(RequestRoute.CACHE_ONLY, RequestRouting.select("/api/state", true, true, forceCache = true))
+        assertEquals(RequestRoute.CACHE_ONLY, RequestRouting.select("/thumb/a.jpg", true, true, forceCache = true))
+        assertEquals(RequestRoute.NETWORK_THEN_CACHE, RequestRouting.select("/thumb/missing.jpg", true, false, forceCache = true))
+        assertEquals(RequestRoute.NATIVE, RequestRouting.select("/media/missing.mp4", true, false, forceCache = true))
+    }
 }

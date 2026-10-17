@@ -22,6 +22,7 @@ import androidx.work.WorkerParameters
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class OfflineSyncWorker(context: Context, parameters: WorkerParameters) : Worker(context, parameters) {
@@ -32,12 +33,13 @@ class OfflineSyncWorker(context: Context, parameters: WorkerParameters) : Worker
         return try {
             publishForeground("Preparing offline sync…", 0, 0)
             val manifest = fetchManifest(credentials)
-            val plan = SyncPlanner.plan(cache.versions(), manifest)
+            val plan = SyncPlanner.plan(cache.records(), manifest)
             val total = plan.downloads.size
+            publishForeground("Syncing $total item(s)", 0, total)
             plan.downloads.forEachIndexed { index, entry ->
                 if (isStopped) throw IOException("Sync stopped")
                 val current = index + 1
-                publishForeground("Syncing item $current of $total", current, total)
+                publishForeground("Syncing $total item(s)", current, total)
                 download(credentials, cache, entry)
             }
             // Never prune until every new/changed resource is safely installed.
@@ -137,7 +139,7 @@ class OfflineSyncWorker(context: Context, parameters: WorkerParameters) : Worker
         private const val CHANNEL_ID = "offline-sync"
         private const val NOTIFICATION_ID = 41
 
-        fun enqueue(context: Context) {
+        fun enqueue(context: Context): UUID {
             val request = OneTimeWorkRequestBuilder<OfflineSyncWorker>()
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
@@ -145,6 +147,7 @@ class OfflineSyncWorker(context: Context, parameters: WorkerParameters) : Worker
             WorkManager.getInstance(context).enqueueUniqueWork(
                 UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, request,
             )
+            return request.id
         }
     }
 }

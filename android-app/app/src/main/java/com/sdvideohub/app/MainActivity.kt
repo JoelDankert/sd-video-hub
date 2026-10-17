@@ -42,10 +42,19 @@ class MainActivity : Activity() {
     private lateinit var root: FrameLayout
     private lateinit var status: TextView
     private var webView: WebView? = null
+    private var cacheClient: CacheClient? = null
+    private val activeSyncIds = mutableSetOf<String>()
     private var modernBackRegistered = false
     private val modernBackCallback = if (Build.VERSION.SDK_INT >= 33) OnBackInvokedCallback { handleWebBack() } else null
     private val syncObserver = Observer<List<WorkInfo>> { work ->
-        val info = work.firstOrNull() ?: return@Observer
+        val snapshots = work.map { SyncWorkSnapshot(it.id.toString(), it.state.toSyncWorkState()) }
+        val selected = SyncWorkSelector.select(snapshots, activeSyncIds) ?: return@Observer
+        val info = work.first { it.id.toString() == selected.id }
+        if (selected.state in setOf(SyncWorkState.ENQUEUED, SyncWorkState.RUNNING, SyncWorkState.BLOCKED)) {
+            activeSyncIds += selected.id
+        } else if (selected.id !in activeSyncIds) {
+            return@Observer
+        }
         val reported = when (info.state) {
             WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED ->
                 info.progress.getString(OfflineSyncWorker.KEY_MESSAGE) ?: "Waiting for network"
@@ -56,20 +65,24 @@ class MainActivity : Activity() {
             WorkInfo.State.CANCELLED -> ""
         }
         showSyncStatus(reported)
+        if (info.state == WorkInfo.State.SUCCEEDED) {
+            activeSyncIds -= selected.id
+            reloadWebFromCache()
+        }
     }
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state); secure = SecureCredentials(this); cache = OfflineCache(this)
         val saved = secure.load()
-        if (saved != null && cache.isComplete("/") && !hasValidatedNetwork()) {
-            showWeb(saved)
+        if (saved != null && hasCachedShell()) {
+            showWeb(saved, forceCache = true)
             statusText("Offline copy")
         } else {
             showLogin(saved)
+            if (saved != null) activeSyncIds += OfflineSyncWorker.enqueue(this).toString()
         }
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData(OfflineSyncWorker.UNIQUE_WORK_NAME)
             .observeForever(syncObserver)
-        if (saved != null) OfflineSyncWorker.enqueue(this)
     }
 
     private fun field(hint: String, value: String = "") = EditText(this).apply {
@@ -92,9 +105,10 @@ class MainActivity : Activity() {
                 status.text = "Enter a valid http(s) server URL"; status.visibility = View.VISIBLE; return@setOnClickListener
             }
             login.isEnabled = false; status.text = "Signing in…"; status.visibility = View.VISIBLE
-            if (saved == credentials && cache.isComplete("/") && !hasValidatedNetwork()) {
-                showWeb(credentials)
+            if (saved == credentials && hasCachedShell()) {
+                showWeb(credentials, forceCache = true)
                 statusText("Offline copy")
+                requestNotificationPermissionIfNeeded()
                 return@setOnClickListener
             }
             worker.execute {
@@ -104,14 +118,14 @@ class MainActivity : Activity() {
                     // the service deliberately fetches it again as the sync owner.
                     secure.save(credentials)
                     runOnUiThread {
-                        showWeb(credentials)
+                        showWeb(credentials, forceCache = false)
                         statusText("Starting offline sync…")
                         requestNotificationPermissionIfNeeded()
-                        OfflineSyncWorker.enqueue(this)
+                        activeSyncIds += OfflineSyncWorker.enqueue(this).toString()
                     }
                 } catch (error: Exception) {
-                    if (saved == credentials && cache.file("/").isFile) {
-                        runOnUiThread { showWeb(credentials); statusText("Offline copy") }
+                    if (saved == credentials && hasCachedShell()) {
+                        runOnUiThread { showWeb(credentials, forceCache = true); statusText("Offline copy") }
                     } else runOnUiThread { login.isEnabled = true; status.text = "Login failed: ${error.message ?: "server unavailable"}" }
                 }
             }
@@ -119,12 +133,16 @@ class MainActivity : Activity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun showWeb(credentials: Credentials) {
+    private fun showWeb(credentials: Credentials, forceCache: Boolean) {
         root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val web = WebView(this).apply {
             settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.mediaPlaybackRequiresUserGesture = false
             webChromeClient = WebChromeClient()
-            webViewClient = CacheClient(credentials)
+            val client = CacheClient(credentials, forceCache, enqueueAfterVisible = forceCache)
+            cacheClient = client
+            webViewClient = client
+            val base = Uri.parse(credentials.baseUrl)
+            setHttpAuthUsernamePassword(base.host, HTTP_AUTH_REALM, credentials.username, credentials.password)
         }
         webView = web
         root.addView(web, FrameLayout.LayoutParams(-1, -1))
@@ -142,6 +160,16 @@ class MainActivity : Activity() {
         }
         setContentView(root)
         registerModernBackCallback()
+        web.loadUrl(credentials.baseUrl + "/", mapOf("Authorization" to Network.authorization(credentials)))
+    }
+
+    private fun hasCachedShell() = cache.isComplete("/") && cache.isComplete("/api/state")
+
+    private fun reloadWebFromCache() {
+        val credentials = secure.load() ?: return
+        val web = webView ?: return
+        if (!hasCachedShell()) return
+        cacheClient?.forceCache = true
         web.loadUrl(credentials.baseUrl + "/", mapOf("Authorization" to Network.authorization(credentials)))
     }
 
@@ -181,8 +209,26 @@ class MainActivity : Activity() {
             return ManifestCodec.parse(connection.inputStream.bufferedReader().use { it.readText() })
         } finally { connection.disconnect() }
     }
-    private inner class CacheClient(private val credentials: Credentials) : WebViewClient() {
-        override fun onReceivedHttpAuthRequest(view: WebView?, handler: HttpAuthHandler, host: String?, realm: String?) = handler.proceed(credentials.username, credentials.password)
+    private inner class CacheClient(
+        private val credentials: Credentials,
+        var forceCache: Boolean,
+        private var enqueueAfterVisible: Boolean,
+    ) : WebViewClient() {
+        override fun onPageCommitVisible(view: WebView?, url: String?) {
+            if (enqueueAfterVisible) {
+                enqueueAfterVisible = false
+                activeSyncIds += OfflineSyncWorker.enqueue(this@MainActivity).toString()
+            }
+        }
+
+        override fun onReceivedHttpAuthRequest(view: WebView?, handler: HttpAuthHandler, host: String?, realm: String?) {
+            val expectedHost = Uri.parse(credentials.baseUrl).host
+            if (host.equals(expectedHost, ignoreCase = true) && realm == HTTP_AUTH_REALM) {
+                handler.proceed(credentials.username, credentials.password)
+            } else {
+                handler.cancel()
+            }
+        }
         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest): WebResourceResponse? {
             if (request.method != "GET") return null
             val uri = request.url
@@ -190,7 +236,7 @@ class MainActivity : Activity() {
             if (uri.scheme != base.scheme || uri.host != base.host || effectivePort(uri) != effectivePort(base)) return null
             val path = uri.encodedPath + (uri.encodedQuery?.let { "?$it" } ?: "")
             val range = request.requestHeaders.entries.firstOrNull { it.key.equals("Range", true) }?.value
-            when (RequestRouting.select(path, hasValidatedNetwork(), cache.isComplete(path))) {
+            when (RequestRouting.select(path, hasValidatedNetwork(), cache.isComplete(path), forceCache)) {
                 RequestRoute.NATIVE -> return null
                 RequestRoute.CACHE_ONLY -> return cache.response(path, range)
                 RequestRoute.NETWORK_THEN_CACHE -> Unit
@@ -271,7 +317,17 @@ class MainActivity : Activity() {
 
     private fun effectivePort(uri: Uri) = if (uri.port != -1) uri.port else if (uri.scheme == "https") 443 else 80
 
+    private fun WorkInfo.State.toSyncWorkState() = when (this) {
+        WorkInfo.State.ENQUEUED -> SyncWorkState.ENQUEUED
+        WorkInfo.State.RUNNING -> SyncWorkState.RUNNING
+        WorkInfo.State.BLOCKED -> SyncWorkState.BLOCKED
+        WorkInfo.State.SUCCEEDED -> SyncWorkState.SUCCEEDED
+        WorkInfo.State.FAILED -> SyncWorkState.FAILED
+        WorkInfo.State.CANCELLED -> SyncWorkState.CANCELLED
+    }
+
     companion object {
         private const val NOTIFICATION_PERMISSION_REQUEST = 701
+        private const val HTTP_AUTH_REALM = "SD Video Hub"
     }
 }

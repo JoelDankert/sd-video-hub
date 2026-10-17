@@ -20,20 +20,22 @@ class OfflineCache(context: Context) {
     private val root = File(context.filesDir, "offline-cache").apply { mkdirs() }
     private val indexStore = CacheIndexStore(root)
     private fun index() = indexStore.read()
-    private fun name(url: String) = MessageDigest.getInstance("SHA-256").digest(url.toByteArray()).joinToString("") { "%02x".format(it) }
-    fun file(url: String) = File(root, name(url))
-    fun versions() = index().filterKeys { file(it).isFile }.mapValues { it.value.first }
+    fun file(url: String) = cacheFile(root, url)
+    fun records(): Map<String, CacheRecord> = effectiveCacheRecords(index(), ::file)
     fun isComplete(url: String): Boolean {
-        val cacheUrl = if (index().containsKey(url)) url else url.substringBefore('?')
-        return index().containsKey(cacheUrl) && file(cacheUrl).isFile
+        val data = records()
+        val cacheUrl = if (data.containsKey(url)) url else url.substringBefore('?')
+        return data[cacheUrl]?.isComplete() == true
     }
-    fun completeUrls(): Set<String> = index().keys.filterTo(linkedSetOf()) { file(it).isFile }
+    fun completeUrls(): Set<String> = records().filterValues(CacheRecord::isComplete).keys
 
     @Synchronized fun install(entry: ManifestEntry, temporary: File) {
         require(temporary.length() == entry.size) { "Size mismatch for ${entry.url}" }
         val destination = file(entry.url)
         if (!temporary.renameTo(destination)) { temporary.copyTo(destination, overwrite = true); temporary.delete() }
-        val data = index(); data[entry.url] = entry.version to entry.mime; indexStore.write(data)
+        val data = index()
+        data[entry.url] = CacheRecord(entry.version, entry.mime, entry.size, entry.size)
+        indexStore.write(data)
     }
     @Synchronized fun prune(valid: Set<String>) {
         val data = index()
@@ -41,10 +43,11 @@ class OfflineCache(context: Context) {
         indexStore.write(data)
     }
     fun response(url: String, rangeHeader: String?): WebResourceResponse? {
-        val data = index()
+        val data = records()
         val cacheUrl = if (data.containsKey(url)) url else url.substringBefore('?')
         val metadata = data[cacheUrl] ?: return null
-        val source = file(cacheUrl); if (!source.isFile) return null
+        val source = file(cacheUrl)
+        if (!source.isFile || metadata.expectedSize == null || source.length() != metadata.expectedSize) return null
         if (cacheUrl == "/api/state" && rangeHeader.isNullOrBlank()) {
             val body = try {
                 CachedStateFilter.filter(source.readText(), completeUrls()).toByteArray()
@@ -57,7 +60,7 @@ class OfflineCache(context: Context) {
         val range = try { RangeLogic.parse(rangeHeader, source.length()) } catch (_: Exception) {
             return WebResourceResponse("text/plain", "UTF-8", 416, "Range Not Satisfiable", mapOf("Content-Range" to "bytes */${source.length()}"), InputStream.nullInputStream())
         }
-        val mime = metadata.second.substringBefore(';')
+        val mime = metadata.mime.substringBefore(';')
         val stream: InputStream = if (range == null) FileInputStream(source) else BoundedInputStream(FileInputStream(source).apply { channel.position(range.start) }, range.length)
         val headers = mutableMapOf("Accept-Ranges" to "bytes", "Content-Length" to (range?.length ?: source.length()).toString())
         if (range != null) headers["Content-Range"] = "bytes ${range.start}-${range.endInclusive}/${source.length()}"
@@ -66,13 +69,31 @@ class OfflineCache(context: Context) {
     }
 }
 
+internal fun cacheFile(root: File, url: String): File {
+    val name = MessageDigest.getInstance("SHA-256")
+        .digest(url.toByteArray())
+        .joinToString("") { "%02x".format(it) }
+    return File(root, name)
+}
+
+internal fun effectiveCacheRecords(
+    index: Map<String, CacheRecord>,
+    fileForUrl: (String) -> File,
+): Map<String, CacheRecord> = index.mapValues { (url, record) ->
+    val actualSize = fileForUrl(url).takeIf(File::isFile)?.length()
+    record.copy(
+        expectedSize = record.expectedSize ?: actualSize,
+        actualSize = actualSize,
+    )
+}
+
 /** A crash-safe index. A complete previous generation is retained until the next write succeeds. */
 class CacheIndexStore(private val root: File) {
     private val primary = File(root, "index.json")
     private val backup = File(root, "index.json.bak")
     private val temporary = File(root, "index.json.tmp")
 
-    @Synchronized fun read(): MutableMap<String, Pair<String, String>> {
+    @Synchronized fun read(): MutableMap<String, CacheRecord> {
         parse(primary)?.let { return it }
         parse(backup)?.let { recovered ->
             write(recovered)
@@ -81,11 +102,13 @@ class CacheIndexStore(private val root: File) {
         return mutableMapOf()
     }
 
-    @Synchronized fun write(data: Map<String, Pair<String, String>>) {
+    @Synchronized fun write(data: Map<String, CacheRecord>) {
         root.mkdirs()
         val json = JSONObject()
         data.forEach { (url, value) ->
-            json.put(url, JSONObject().put("version", value.first).put("mime", value.second))
+            val record = JSONObject().put("version", value.version).put("mime", value.mime)
+            value.expectedSize?.let { record.put("size", it) }
+            json.put(url, record)
         }
         FileOutputStream(temporary).use { output ->
             output.write(json.toString().toByteArray())
@@ -101,10 +124,17 @@ class CacheIndexStore(private val root: File) {
         }
     }
 
-    private fun parse(file: File): MutableMap<String, Pair<String, String>>? = try {
+    private fun parse(file: File): MutableMap<String, CacheRecord>? = try {
         val json = JSONObject(file.readText())
         json.keys().asSequence().associateWith { key ->
-            json.getJSONObject(key).let { it.getString("version") to it.getString("mime") }
+            json.getJSONObject(key).let {
+                CacheRecord(
+                    version = it.getString("version"),
+                    mime = it.getString("mime"),
+                    expectedSize = if (it.has("size")) it.getLong("size") else null,
+                    actualSize = null,
+                )
+            }
         }.toMutableMap()
     } catch (_: Exception) {
         null
