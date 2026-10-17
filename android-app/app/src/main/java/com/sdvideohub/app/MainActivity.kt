@@ -7,18 +7,15 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
-import android.webkit.HttpAuthHandler
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -33,17 +30,14 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Observer
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
-import java.io.FilterInputStream
-import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
-    private val worker = Executors.newSingleThreadExecutor()
     private lateinit var secure: SecureCredentials
     private lateinit var cache: OfflineCache
     private lateinit var root: FrameLayout
     private lateinit var status: TextView
     private var webView: WebView? = null
-    private var cacheClient: CacheClient? = null
+    private var localServer: LoopbackHttpServer? = null
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var systemUiBeforeFullscreen: SystemUiState? = null
@@ -79,12 +73,11 @@ class MainActivity : Activity() {
     override fun onCreate(state: Bundle?) {
         super.onCreate(state); secure = SecureCredentials(this); cache = OfflineCache(this)
         val saved = secure.load()
-        if (saved != null && hasCachedShell()) {
-            showWeb(saved, forceCache = true)
-            statusText("Offline copy")
+        if (saved != null) {
+            showLogin(saved)
+            activeSyncIds += OfflineSyncWorker.enqueue(this).toString()
         } else {
             showLogin(saved)
-            if (saved != null) activeSyncIds += OfflineSyncWorker.enqueue(this).toString()
         }
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData(OfflineSyncWorker.UNIQUE_WORK_NAME)
             .observeForever(syncObserver)
@@ -109,38 +102,26 @@ class MainActivity : Activity() {
             if (!(url.startsWith("http://") || url.startsWith("https://")) || Uri.parse(url).host.isNullOrBlank()) {
                 status.text = "Enter a valid http(s) server URL"; status.visibility = View.VISIBLE; return@setOnClickListener
             }
-            login.isEnabled = false; status.text = "Signing in…"; status.visibility = View.VISIBLE
-            if (saved == credentials && hasCachedShell()) {
-                showWeb(credentials, forceCache = true)
-                statusText("Offline copy")
-                requestNotificationPermissionIfNeeded()
-                return@setOnClickListener
-            }
-            worker.execute {
-                try {
-                    fetchManifest(credentials)
-                    // Parsing the authenticated response completes login validation;
-                    // the service deliberately fetches it again as the sync owner.
-                    secure.save(credentials)
-                    runOnUiThread {
-                        showWeb(credentials, forceCache = false)
-                        statusText("Starting offline sync…")
-                        requestNotificationPermissionIfNeeded()
-                        activeSyncIds += OfflineSyncWorker.enqueue(this).toString()
-                    }
-                } catch (error: Exception) {
-                    if (saved == credentials && hasCachedShell()) {
-                        runOnUiThread { showWeb(credentials, forceCache = true); statusText("Offline copy") }
-                    } else runOnUiThread { login.isEnabled = true; status.text = "Login failed: ${error.message ?: "server unavailable"}" }
-                }
-            }
+            login.isEnabled = false
+            secure.save(credentials)
+            cache = OfflineCache(this)
+            showWeb(credentials)
+            statusText(if (hasCachedShell()) "Offline copy" else "Connecting…")
+            requestNotificationPermissionIfNeeded()
+            activeSyncIds += OfflineSyncWorker.enqueue(this).toString()
         }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun showWeb(credentials: Credentials, forceCache: Boolean) {
+    private fun showWeb(credentials: Credentials) {
+        localServer?.close()
+        val server = LoopbackHttpServer(cache.repository, credentials.baseUrl, credentials) { message ->
+            Log.d("SDH/Reliability", message)
+        }.start()
+        localServer = server
         root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val web = WebView(this).apply {
+            setBackgroundColor(Color.rgb(17, 18, 20))
             settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.mediaPlaybackRequiresUserGesture = false
             webChromeClient = object : WebChromeClient() {
                 override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
@@ -168,11 +149,12 @@ class MainActivity : Activity() {
                     hideCustomView()
                 }
             }
-            val client = CacheClient(credentials, forceCache, enqueueAfterVisible = forceCache)
-            cacheClient = client
-            webViewClient = client
-            val base = Uri.parse(credentials.baseUrl)
-            setHttpAuthUsernamePassword(base.host, HTTP_AUTH_REALM, credentials.username, credentials.password)
+            webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest): Boolean {
+                    val uri = request.url
+                    return uri.scheme != "http" || uri.host != "127.0.0.1" || uri.port != server.port
+                }
+            }
         }
         webView = web
         root.addView(web, FrameLayout.LayoutParams(-1, -1))
@@ -190,17 +172,27 @@ class MainActivity : Activity() {
         }
         setContentView(root)
         registerModernBackCallback()
-        web.loadUrl(credentials.baseUrl + "/", mapOf("Authorization" to Network.authorization(credentials)))
+        val cookie = "${LoopbackHttpServer.COOKIE_NAME}=${server.secret}; Path=/; HttpOnly; SameSite=Strict"
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setCookie(server.origin, cookie) {
+            web.post { web.loadUrl(server.origin + "/") }
+        }
     }
 
     private fun hasCachedShell() = cache.isComplete("/") && cache.isComplete("/api/state")
 
     private fun reloadWebFromCache() {
-        val credentials = secure.load() ?: return
+        secure.load() ?: return
         val web = webView ?: return
         if (!hasCachedShell()) return
-        cacheClient?.forceCache = true
-        web.loadUrl(credentials.baseUrl + "/", mapOf("Authorization" to Network.authorization(credentials)))
+        val server = localServer ?: return
+        // Refresh the site's data, not its document: a successful background sync must
+        // never tear down the active player or native fullscreen session.
+        web.evaluateJavascript(WebPageScripts.REFRESH) { refreshed ->
+            if (refreshed == "false" && webView === web && localServer === server && customView == null) {
+                web.loadUrl(server.origin + "/")
+            }
+        }
     }
 
     private fun statusText(value: String) = runOnUiThread { status.text = value; status.visibility = if (value.isBlank()) View.GONE else View.VISIBLE }
@@ -232,61 +224,6 @@ class MainActivity : Activity() {
             showSyncStatus("Sync continues in background")
         }
     }
-    private fun fetchManifest(credentials: Credentials): List<ManifestEntry> {
-        val connection = Network.open(credentials.baseUrl, "/api/offline-manifest", credentials)
-        try {
-            if (connection.responseCode != 200) throw IllegalStateException(if (connection.responseCode == 401) "invalid credentials" else "HTTP ${connection.responseCode}")
-            return ManifestCodec.parse(connection.inputStream.bufferedReader().use { it.readText() })
-        } finally { connection.disconnect() }
-    }
-    private inner class CacheClient(
-        private val credentials: Credentials,
-        var forceCache: Boolean,
-        private var enqueueAfterVisible: Boolean,
-    ) : WebViewClient() {
-        override fun onPageCommitVisible(view: WebView?, url: String?) {
-            if (enqueueAfterVisible) {
-                enqueueAfterVisible = false
-                activeSyncIds += OfflineSyncWorker.enqueue(this@MainActivity).toString()
-            }
-        }
-
-        override fun onReceivedHttpAuthRequest(view: WebView?, handler: HttpAuthHandler, host: String?, realm: String?) {
-            val expectedHost = Uri.parse(credentials.baseUrl).host
-            if (host.equals(expectedHost, ignoreCase = true) && realm == HTTP_AUTH_REALM) {
-                handler.proceed(credentials.username, credentials.password)
-            } else {
-                handler.cancel()
-            }
-        }
-        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest): WebResourceResponse? {
-            if (request.method != "GET") return null
-            val uri = request.url
-            val base = Uri.parse(credentials.baseUrl)
-            if (uri.scheme != base.scheme || uri.host != base.host || effectivePort(uri) != effectivePort(base)) return null
-            val path = uri.encodedPath + (uri.encodedQuery?.let { "?$it" } ?: "")
-            val range = request.requestHeaders.entries.firstOrNull { it.key.equals("Range", true) }?.value
-            when (RequestRouting.select(path, hasValidatedNetwork(), cache.isComplete(path), forceCache)) {
-                RequestRoute.NATIVE -> return null
-                RequestRoute.CACHE_ONLY -> return cache.response(path, range)
-                RequestRoute.NETWORK_THEN_CACHE -> Unit
-            }
-            try {
-                val connection = Network.open(credentials.baseUrl, path, credentials, range)
-                val code = connection.responseCode
-                if (code in 200..299) {
-                    val mime = connection.contentType?.substringBefore(';') ?: "application/octet-stream"
-                    val headers = connection.headerFields.filterKeys { it != null }.mapValues { it.value.joinToString(", ") }
-                    val stream = object : FilterInputStream(connection.inputStream) { override fun close() { super.close(); connection.disconnect() } }
-                    return WebResourceResponse(mime, connection.contentEncoding, code, connection.responseMessage ?: "OK", headers, stream)
-                }
-                connection.disconnect()
-            } catch (_: Exception) { }
-            return cache.response(path, range)
-        }
-        private fun effectivePort(uri: Uri) = if (uri.port != -1) uri.port else if (uri.scheme == "https") 443 else 80
-    }
-
     override fun onStart() {
         super.onStart()
         registerModernBackCallback()
@@ -301,7 +238,8 @@ class MainActivity : Activity() {
         hideCustomView()
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData(OfflineSyncWorker.UNIQUE_WORK_NAME)
             .removeObserver(syncObserver)
-        worker.shutdownNow()
+        localServer?.close()
+        localServer = null
         super.onDestroy()
     }
 
@@ -317,9 +255,9 @@ class MainActivity : Activity() {
         }
         val web = webView ?: return
         val current = web.url?.let(Uri::parse)
-        val expected = secure.load()?.baseUrl?.let(Uri::parse)
-        val trusted = current != null && expected != null && current.scheme == expected.scheme &&
-            current.host == expected.host && effectivePort(current) == effectivePort(expected)
+        val server = localServer
+        val trusted = current != null && server != null && current.scheme == "http" &&
+            current.host == "127.0.0.1" && current.port == server.port
         if (!trusted) return
         web.evaluateJavascript(
             "(()=>{const v=document.getElementById('viewer');if(v&&!v.hidden&&typeof closeViewer==='function'){closeViewer();return true}return false})()",
@@ -357,14 +295,6 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun hasValidatedNetwork(): Boolean {
-        val manager = getSystemService(ConnectivityManager::class.java)
-        val network = manager.activeNetwork ?: return false
-        return manager.getNetworkCapabilities(network)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-    }
-
-    private fun effectivePort(uri: Uri) = if (uri.port != -1) uri.port else if (uri.scheme == "https") 443 else 80
-
     private fun WorkInfo.State.toSyncWorkState() = when (this) {
         WorkInfo.State.ENQUEUED -> SyncWorkState.ENQUEUED
         WorkInfo.State.RUNNING -> SyncWorkState.RUNNING
@@ -376,6 +306,5 @@ class MainActivity : Activity() {
 
     companion object {
         private const val NOTIFICATION_PERMISSION_REQUEST = 701
-        private const val HTTP_AUTH_REALM = "SD Video Hub"
     }
 }
