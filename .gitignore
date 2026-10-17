@@ -69,6 +69,8 @@ assets/templates/
 *.[jJ][pP][gG]
 *.[jJ][pP][eE][gG]
 *.[pP][nN][gG]
+!android-app/app/src/main/res/mipmap-*/ic_launcher.png
+!android-app/app/src/main/res/mipmap-*/ic_launcher_round.png
 *.[gG][iI][fF]
 *.[wW][eE][bB][pP]
 *.[bB][mM][pP]

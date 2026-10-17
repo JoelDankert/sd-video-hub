@@ -19,6 +19,8 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import java.io.File
 import java.io.FilterInputStream
 import java.net.HttpURLConnection
@@ -83,7 +85,17 @@ class MainActivity : Activity() {
         }
         root.addView(web, FrameLayout.LayoutParams(-1, -1))
         status = TextView(this).apply { setTextColor(Color.WHITE); setBackgroundColor(0xB0000000.toInt()); setPadding(18, 10, 18, 10); textSize = 12f }
-        root.addView(status, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { setMargins(12, 12, 12, 12) })
+        val statusMargin = (12 * resources.displayMetrics.density).toInt()
+        val statusLayout = FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply {
+            setMargins(statusMargin, statusMargin, statusMargin, statusMargin)
+        }
+        root.addView(status, statusLayout)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            statusLayout.bottomMargin = statusMargin + systemBars.bottom
+            status.layoutParams = statusLayout
+            insets
+        }
         setContentView(root)
         web.loadUrl(credentials.baseUrl + "/", mapOf("Authorization" to Network.authorization(credentials)))
     }

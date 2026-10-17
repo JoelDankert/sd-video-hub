@@ -6,16 +6,19 @@
   authenticated WebView loading, manifest synchronization, app-private atomic cache,
   online-first/offline-fallback interception, and seekable cached range responses.
 - Added the authenticated server manifest and end-to-end server tests.
-- Vendored and attributed the Font Awesome Free video icon and generated adaptive and
-  legacy launcher resources.
+- Replaced the Font Awesome launcher artwork with the vendored Phosphor Icons regular
+  Drone SVG, updated the MIT attribution, and regenerated adaptive and legacy assets.
+- Moved the WebView synchronization indicator to the bottom-right with a 12 dp margin
+  plus the system bottom inset.
 
 ## Verification (2026-10-17)
 
 - `python3 -m unittest -v test_offline_manifest.py`: **passed**, 2 tests.
 - `python3 -m py_compile app.py test_offline_manifest.py`: **passed**.
-- `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks.
-- APK: `app/build/outputs/apk/debug/app-debug.apk`, 2.4 MiB,
-  SHA-256 `c43030248fed339f2a2a7a99ecb3fe116a5dc0efa8b30606119e0bb4bae3ec3c`.
+- `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks
+  (14 executed, 27 up-to-date).
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 2,621,457 bytes,
+  SHA-256 `4c7cd63ebf368b6bc3657559f90fc2150f64bf70fdc65dc0c46d4dbc20f7bcf1`.
 
 ## Build notes
 

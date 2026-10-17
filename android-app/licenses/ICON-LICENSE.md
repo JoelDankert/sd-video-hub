@@ -1,11 +1,11 @@
 # Launcher icon attribution
 
-The launcher artwork is derived from the Font Awesome Free **video** icon.
+The launcher artwork is derived from the Phosphor Icons regular **Drone** icon.
 
-- Source: https://github.com/FortAwesome/Font-Awesome/blob/6.x/svgs/solid/video.svg
-- Project: https://fontawesome.com/
-- Copyright: Fonticons, Inc.
-- License: Creative Commons Attribution 4.0 International (CC BY 4.0), https://creativecommons.org/licenses/by/4.0/
+- Source: https://raw.githubusercontent.com/phosphor-icons/core/main/assets/regular/drone.svg
+- Project: https://phosphoricons.com/
+- Copyright: 2023 Phosphor Icons
+- License: MIT License, https://github.com/phosphor-icons/core/blob/main/LICENSE
 
-The downloaded upstream SVG is retained as `fontawesome-video.svg`. Colors, background,
-and the internal play triangle are adaptations for SD Video Hub.
+The exact downloaded upstream SVG is retained as `phosphor-drone.svg`. Its path is
+recolored and inset over the SD Video Hub background for the Android launcher assets.
