@@ -1,0 +1,4 @@
+<network-security-config>
+    <!-- The product's local-LAN default is HTTP; TLS remains validated normally elsewhere. -->
+    <base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config>
+</network-security-config>

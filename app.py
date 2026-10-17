@@ -222,6 +222,39 @@ def auth(h):
  pw=os.environ.get('SDH_PASSWORD','')
  try:return bool(pw) and h.lower().startswith('basic ') and base64.b64decode(h.split(' ',1)[1]).decode().split(':',1)[1]==pw
  except Exception:return False
+def index_bytes():
+ source=(ROOT/'index.html').read_text()
+ source=source.replace('__SDH_CUTLIST__',json.dumps(str(CUTLIST)))
+ source=source.replace("const dur=s=>{s=Math.round(Number(s||0));return s?`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`:'—'};", "const dur=s=>{s=Math.round(Number(s||0));return s?`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`:'—'};const rec=f=>new Date(Number(f.recorded_at)*1000).toLocaleString('de-DE',{dateStyle:'medium',timeStyle:'short'});")
+ source=source.replace("@media(max-width:600px)", ".crop43-thumbs .video.hdzero .thumb{aspect-ratio:4/3}.crop43-thumbs .video.hdzero .thumb img{object-fit:cover}@media(max-width:600px)")
+ source=source.replace("comp=own.length?Math.round(own.reduce((a,f)=>a+Number(f.compress_progress||0),0)/own.length):0,processed=", "totalWork=own.reduce((a,f)=>a+Number(f.size||0),0),comp=totalWork?Math.round(own.reduce((a,f)=>a+Number(f.size||0)*Number(f.compress_progress||0),0)/totalWork):0,processed=")
+ source=source.replace("x.sort((a,b)=>b.id-a.id);", "x.sort((a,b)=>{let ag=a.recorded_source==='embedded'?0:String(a.session).startsWith('pc-fpv-')?2:1,bg=b.recorded_source==='embedded'?0:String(b.session).startsWith('pc-fpv-')?2:1;if(ag!==bg)return ag-bg;if(ag===0)return Number(b.recorded_at||0)-Number(a.recorded_at||0);let an=Number((String(a.name).match(/\\d+/)||[0])[0]),bn=Number((String(b.name).match(/\\d+/)||[0])[0]);return bn-an||String(b.name).localeCompare(String(a.name),'de')});")
+ source=source.replace("<article class=video>", "<article class=\"video ${f.recorded_source==='embedded'?'hdzero':''}\">")
+ source=source.replace("function applyCrop(){viewer.classList.toggle('crop43',cropToggle.checked)}", "function applyCrop(){viewer.classList.toggle('crop43',cropToggle.checked);document.body.classList.toggle('crop43-thumbs',cropToggle.checked)}")
+ source=source.replace("let rel=f.output.split('/library/')[1]||'',skips=skipMap[rel]||[],encoded=", "let rel=f.output.split('/library/')[1]||'',skips=f.recorded_source==='embedded'?(skipMap[rel]||[]):[],flight=Math.max(0,Number(f.duration||0)-skips.reduce((sum,x)=>sum+Math.max(0,Math.min(Number(f.duration||0),Number(x[1]))-Math.max(0,Number(x[0]))),0)),encoded=")
+ source=source.replace("${dur(f.duration)} · ${fmt(f.output_size)} · MP4", "${f.recorded_source==='embedded'?`${dur(flight)} / ${dur(f.duration)} · ${rec(f)}`:dur(f.duration)} · ${fmt(f.output_size)}")
+ return source.encode()
+def offline_manifest():
+ """Return only resources the first-party UI can request; no client paths are accepted."""
+ entries=[]
+ def generated(url,mime,body):entries.append({'url':url,'mime':mime,'size':len(body),'version':hashlib.sha256(body).hexdigest()})
+ def backed(url,mime,path):
+  try:
+   stat=path.stat()
+   if path.is_file():entries.append({'url':url,'mime':mime,'size':stat.st_size,'version':f'{stat.st_size}-{stat.st_mtime_ns}'})
+  except OSError:pass
+ generated('/','text/html; charset=utf-8',index_bytes())
+ state=snapshot()
+ generated('/api/state','application/json',json.dumps(state).encode())
+ if CUTLIST.is_file():backed('/media/'+urllib.parse.quote(str(CUTLIST),safe=''),'application/json',CUTLIST)
+ for item in state['files']:
+  if item.get('status')!='done':continue
+  output=Path(item.get('output','')).resolve()
+  if LIB.resolve() in output.parents:backed(item['video_url'],mimetypes.guess_type(output.name)[0] or 'application/octet-stream',output)
+  if item.get('thumb_url'):
+   thumb=Path(item.get('thumb','')).resolve()
+   if THUMBS.resolve() in thumb.parents:backed(item['thumb_url'],mimetypes.guess_type(thumb.name)[0] or 'application/octet-stream',thumb)
+ return {'schema':1,'generated_at':int(time.time()),'entries':sorted(entries,key=lambda x:x['url'])}
 class H(BaseHTTPRequestHandler):
  def log_message(self,*a):pass
  def unauth(self):self.send_response(401);self.send_header('WWW-Authenticate','Basic realm="SD Video Hub"');self.end_headers()
@@ -304,6 +337,7 @@ class H(BaseHTTPRequestHandler):
   if not auth(self.headers.get('Authorization','')):return self.unauth()
   u=urllib.parse.urlparse(self.path)
   if u.path=='/api/state':return self.js(snapshot())
+  if u.path=='/api/offline-manifest':return self.js(offline_manifest())
   if u.path.startswith('/api/flight-download/'):
    try:return self.js(downloads().status(u.path.rsplit('/',1)[1]))
    except KeyError as error:return self.js({'error':str(error)},404)

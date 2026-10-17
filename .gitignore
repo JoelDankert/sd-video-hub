@@ -93,6 +93,7 @@ assets/templates/
 **/test/
 **/tests/
 test_*.py
+!test_offline_manifest.py
 *_test.py
 *.bak
 *.backup
