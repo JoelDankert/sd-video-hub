@@ -7,8 +7,10 @@ import android.webkit.WebResourceResponse
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -16,14 +18,11 @@ import java.util.Base64
 
 class OfflineCache(context: Context) {
     private val root = File(context.filesDir, "offline-cache").apply { mkdirs() }
-    private val indexFile = File(root, "index.json")
-    @Synchronized private fun index(): MutableMap<String, Pair<String, String>> = try {
-        val json = JSONObject(indexFile.readText())
-        json.keys().asSequence().associateWith { key -> json.getJSONObject(key).let { it.getString("version") to it.getString("mime") } }.toMutableMap()
-    } catch (_: Exception) { mutableMapOf() }
+    private val indexStore = CacheIndexStore(root)
+    private fun index() = indexStore.read()
     private fun name(url: String) = MessageDigest.getInstance("SHA-256").digest(url.toByteArray()).joinToString("") { "%02x".format(it) }
     fun file(url: String) = File(root, name(url))
-    fun versions() = index().mapValues { it.value.first }
+    fun versions() = index().filterKeys { file(it).isFile }.mapValues { it.value.first }
     fun isComplete(url: String): Boolean {
         val cacheUrl = if (index().containsKey(url)) url else url.substringBefore('?')
         return index().containsKey(cacheUrl) && file(cacheUrl).isFile
@@ -34,16 +33,12 @@ class OfflineCache(context: Context) {
         require(temporary.length() == entry.size) { "Size mismatch for ${entry.url}" }
         val destination = file(entry.url)
         if (!temporary.renameTo(destination)) { temporary.copyTo(destination, overwrite = true); temporary.delete() }
-        val data = index(); data[entry.url] = entry.version to entry.mime; writeIndex(data)
+        val data = index(); data[entry.url] = entry.version to entry.mime; indexStore.write(data)
     }
     @Synchronized fun prune(valid: Set<String>) {
         val data = index()
         data.keys.filterNot(valid::contains).forEach { url -> file(url).delete(); data.remove(url) }
-        writeIndex(data)
-    }
-    private fun writeIndex(data: Map<String, Pair<String, String>>) {
-        val json = JSONObject(); data.forEach { (url, value) -> json.put(url, JSONObject().put("version", value.first).put("mime", value.second)) }
-        val tmp = File(root, "index.json.tmp"); tmp.writeText(json.toString()); if (!tmp.renameTo(indexFile)) { tmp.copyTo(indexFile, true); tmp.delete() }
+        indexStore.write(data)
     }
     fun response(url: String, rangeHeader: String?): WebResourceResponse? {
         val data = index()
@@ -68,6 +63,51 @@ class OfflineCache(context: Context) {
         if (range != null) headers["Content-Range"] = "bytes ${range.start}-${range.endInclusive}/${source.length()}"
         return WebResourceResponse(mime, if (mime.startsWith("text/") || mime == "application/json") "UTF-8" else null,
             if (range == null) 200 else 206, if (range == null) "OK" else "Partial Content", headers, stream)
+    }
+}
+
+/** A crash-safe index. A complete previous generation is retained until the next write succeeds. */
+class CacheIndexStore(private val root: File) {
+    private val primary = File(root, "index.json")
+    private val backup = File(root, "index.json.bak")
+    private val temporary = File(root, "index.json.tmp")
+
+    @Synchronized fun read(): MutableMap<String, Pair<String, String>> {
+        parse(primary)?.let { return it }
+        parse(backup)?.let { recovered ->
+            write(recovered)
+            return recovered
+        }
+        return mutableMapOf()
+    }
+
+    @Synchronized fun write(data: Map<String, Pair<String, String>>) {
+        root.mkdirs()
+        val json = JSONObject()
+        data.forEach { (url, value) ->
+            json.put(url, JSONObject().put("version", value.first).put("mime", value.second))
+        }
+        FileOutputStream(temporary).use { output ->
+            output.write(json.toString().toByteArray())
+            output.fd.sync()
+        }
+        if (primary.isFile) {
+            if (backup.exists() && !backup.delete()) throw IOException("Cannot replace cache index backup")
+            if (!primary.renameTo(backup)) throw IOException("Cannot back up cache index")
+        }
+        if (!temporary.renameTo(primary)) {
+            backup.renameTo(primary)
+            throw IOException("Cannot publish cache index")
+        }
+    }
+
+    private fun parse(file: File): MutableMap<String, Pair<String, String>>? = try {
+        val json = JSONObject(file.readText())
+        json.keys().asSequence().associateWith { key ->
+            json.getJSONObject(key).let { it.getString("version") to it.getString("mime") }
+        }.toMutableMap()
+    } catch (_: Exception) {
+        null
     }
 }
 

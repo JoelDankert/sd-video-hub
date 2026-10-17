@@ -50,11 +50,15 @@ enum class RequestRoute { NATIVE, CACHE_ONLY, NETWORK_THEN_CACHE }
 
 object RequestRouting {
     fun select(path: String, networkValidated: Boolean, cached: Boolean): RequestRoute {
-        if (!networkValidated) return RequestRoute.CACHE_ONLY
         val pathname = path.substringBefore('?')
-        val isNativeStreamOrDownload = pathname.startsWith("/media/") ||
-            pathname.startsWith("/flight-download/") || path.substringAfter('?', "") == "download"
-        return if (isNativeStreamOrDownload && !cached) RequestRoute.NATIVE else RequestRoute.NETWORK_THEN_CACHE
+        if (pathname.startsWith("/media/")) {
+            if (cached) return RequestRoute.CACHE_ONLY
+            return if (networkValidated) RequestRoute.NATIVE else RequestRoute.CACHE_ONLY
+        }
+        if (!networkValidated) return RequestRoute.CACHE_ONLY
+        val isNativeDownload = pathname.startsWith("/flight-download/") ||
+            path.substringAfter('?', "") == "download"
+        return if (isNativeDownload) RequestRoute.NATIVE else RequestRoute.NETWORK_THEN_CACHE
     }
 }
 

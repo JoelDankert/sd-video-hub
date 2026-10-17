@@ -3,10 +3,7 @@ package com.sdvideohub.app
 import android.annotation.SuppressLint
 import android.Manifest
 import android.app.Activity
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
@@ -32,6 +29,9 @@ import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Observer
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import java.io.FilterInputStream
 import java.util.concurrent.Executors
 
@@ -44,18 +44,32 @@ class MainActivity : Activity() {
     private var webView: WebView? = null
     private var modernBackRegistered = false
     private val modernBackCallback = if (Build.VERSION.SDK_INT >= 33) OnBackInvokedCallback { handleWebBack() } else null
-    private var receiverRegistered = false
-    private val syncStatusReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            showSyncStatus(intent?.getStringExtra(OfflineSyncService.EXTRA_MESSAGE).orEmpty())
+    private val syncObserver = Observer<List<WorkInfo>> { work ->
+        val info = work.firstOrNull() ?: return@Observer
+        val reported = when (info.state) {
+            WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED ->
+                info.progress.getString(OfflineSyncWorker.KEY_MESSAGE) ?: "Waiting for network"
+            WorkInfo.State.RUNNING ->
+                info.progress.getString(OfflineSyncWorker.KEY_MESSAGE) ?: "Preparing offline sync…"
+            WorkInfo.State.SUCCEEDED, WorkInfo.State.FAILED ->
+                info.outputData.getString(OfflineSyncWorker.KEY_MESSAGE).orEmpty()
+            WorkInfo.State.CANCELLED -> ""
         }
+        showSyncStatus(reported)
     }
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state); secure = SecureCredentials(this); cache = OfflineCache(this)
         val saved = secure.load()
-        showLogin(saved)
-        if (saved != null && hasValidatedNetwork()) OfflineSyncService.start(this)
+        if (saved != null && cache.isComplete("/") && !hasValidatedNetwork()) {
+            showWeb(saved)
+            statusText("Offline copy")
+        } else {
+            showLogin(saved)
+        }
+        WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData(OfflineSyncWorker.UNIQUE_WORK_NAME)
+            .observeForever(syncObserver)
+        if (saved != null) OfflineSyncWorker.enqueue(this)
     }
 
     private fun field(hint: String, value: String = "") = EditText(this).apply {
@@ -93,7 +107,7 @@ class MainActivity : Activity() {
                         showWeb(credentials)
                         statusText("Starting offline sync…")
                         requestNotificationPermissionIfNeeded()
-                        OfflineSyncService.start(this)
+                        OfflineSyncWorker.enqueue(this)
                     }
                 } catch (error: Exception) {
                     if (saved == credentials && cache.file("/").isFile) {
@@ -200,27 +214,19 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         registerModernBackCallback()
-        if (!receiverRegistered) {
-            ContextCompat.registerReceiver(
-                this, syncStatusReceiver, IntentFilter(OfflineSyncService.ACTION_STATUS),
-                ContextCompat.RECEIVER_NOT_EXPORTED,
-            )
-            receiverRegistered = true
-        }
-        val syncStatus = getSharedPreferences(OfflineSyncService.STATUS_PREFERENCES, Context.MODE_PRIVATE)
-        showSyncStatus(syncStatus.getString(OfflineSyncService.KEY_MESSAGE, "").orEmpty())
     }
 
     override fun onStop() {
         unregisterModernBackCallback()
-        if (receiverRegistered) {
-            unregisterReceiver(syncStatusReceiver)
-            receiverRegistered = false
-        }
         super.onStop()
     }
 
-    override fun onDestroy() { worker.shutdownNow(); super.onDestroy() }
+    override fun onDestroy() {
+        WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData(OfflineSyncWorker.UNIQUE_WORK_NAME)
+            .removeObserver(syncObserver)
+        worker.shutdownNow()
+        super.onDestroy()
+    }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
