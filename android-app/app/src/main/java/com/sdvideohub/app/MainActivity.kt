@@ -1,9 +1,16 @@
 package com.sdvideohub.app
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -17,13 +24,11 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import java.io.File
+import androidx.core.content.ContextCompat
 import java.io.FilterInputStream
-import java.net.HttpURLConnection
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
@@ -32,11 +37,18 @@ class MainActivity : Activity() {
     private lateinit var cache: OfflineCache
     private lateinit var root: FrameLayout
     private lateinit var status: TextView
-    @Volatile private var active: Credentials? = null
+    private var receiverRegistered = false
+    private val syncStatusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            showSyncStatus(intent?.getStringExtra(OfflineSyncService.EXTRA_MESSAGE).orEmpty())
+        }
+    }
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state); secure = SecureCredentials(this); cache = OfflineCache(this)
-        showLogin(secure.load())
+        val saved = secure.load()
+        showLogin(saved)
+        if (saved != null) OfflineSyncService.start(this)
     }
 
     private fun field(hint: String, value: String = "") = EditText(this).apply {
@@ -61,13 +73,18 @@ class MainActivity : Activity() {
             login.isEnabled = false; status.text = "Signing in…"; status.visibility = View.VISIBLE
             worker.execute {
                 try {
-                    val manifest = fetchManifest(credentials)
-                    secure.save(credentials); active = credentials
-                    runOnUiThread { showWeb(credentials); statusText("Synchronizing…") }
-                    synchronize(credentials, manifest)
+                    fetchManifest(credentials)
+                    // Parsing the authenticated response completes login validation;
+                    // the service deliberately fetches it again as the sync owner.
+                    secure.save(credentials)
+                    runOnUiThread {
+                        showWeb(credentials)
+                        statusText("Starting offline sync…")
+                        requestNotificationPermissionIfNeeded()
+                        OfflineSyncService.start(this)
+                    }
                 } catch (error: Exception) {
                     if (saved == credentials && cache.file("/").isFile) {
-                        active = credentials
                         runOnUiThread { showWeb(credentials); statusText("Offline copy") }
                     } else runOnUiThread { login.isEnabled = true; status.text = "Login failed: ${error.message ?: "server unavailable"}" }
                 }
@@ -101,6 +118,34 @@ class MainActivity : Activity() {
     }
 
     private fun statusText(value: String) = runOnUiThread { status.text = value; status.visibility = if (value.isBlank()) View.GONE else View.VISIBLE }
+    private fun showSyncStatus(value: String) {
+        if (value.isBlank()) return
+        val notificationsHidden = Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        statusText(if (notificationsHidden) "$value · notifications hidden" else value)
+        if (!notificationsHidden && (value == "Up to date" || value == "Offline copy updated")) {
+            status.postDelayed({ statusText("") }, 1800)
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val preferences = getSharedPreferences("notification-permission", Context.MODE_PRIVATE)
+        if (!preferences.getBoolean("asked", false)) {
+            preferences.edit().putBoolean("asked", true).apply()
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
+        } else {
+            showSyncStatus("Sync continues in background")
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST && grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+            showSyncStatus("Sync continues in background")
+        }
+    }
     private fun fetchManifest(credentials: Credentials): List<ManifestEntry> {
         val connection = Network.open(credentials.baseUrl, "/api/offline-manifest", credentials)
         try {
@@ -108,25 +153,6 @@ class MainActivity : Activity() {
             return ManifestCodec.parse(connection.inputStream.bufferedReader().use { it.readText() })
         } finally { connection.disconnect() }
     }
-    private fun synchronize(credentials: Credentials, manifest: List<ManifestEntry> = fetchManifest(credentials)) {
-        try {
-            val changed = ManifestCodec.changed(cache.versions(), manifest)
-            changed.forEachIndexed { index, entry ->
-                statusText("Sync ${index + 1}/${changed.size}")
-                val connection = Network.open(credentials.baseUrl, entry.url, credentials)
-                val temporary = File(cache.file(entry.url).parentFile, cache.file(entry.url).name + ".part")
-                try {
-                    if (connection.responseCode != 200) throw IllegalStateException("${entry.url}: HTTP ${connection.responseCode}")
-                    connection.inputStream.use { input -> temporary.outputStream().use(input::copyTo) }
-                    cache.install(entry, temporary)
-                } finally { connection.disconnect(); if (temporary.exists()) temporary.delete() }
-            }
-            cache.prune(manifest.map { it.url }.toSet())
-            statusText(if (changed.isEmpty()) "Up to date" else "Offline copy updated")
-            status.postDelayed({ statusText("") }, 1800)
-        } catch (error: Exception) { statusText("Offline copy retained · sync unavailable") }
-    }
-
     private inner class CacheClient(private val credentials: Credentials) : WebViewClient() {
         override fun onReceivedHttpAuthRequest(view: WebView?, handler: HttpAuthHandler, host: String?, realm: String?) = handler.proceed(credentials.username, credentials.password)
         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest): WebResourceResponse? {
@@ -152,5 +178,30 @@ class MainActivity : Activity() {
         private fun effectivePort(uri: Uri) = if (uri.port != -1) uri.port else if (uri.scheme == "https") 443 else 80
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (!receiverRegistered) {
+            ContextCompat.registerReceiver(
+                this, syncStatusReceiver, IntentFilter(OfflineSyncService.ACTION_STATUS),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            receiverRegistered = true
+        }
+        val syncStatus = getSharedPreferences(OfflineSyncService.STATUS_PREFERENCES, Context.MODE_PRIVATE)
+        showSyncStatus(syncStatus.getString(OfflineSyncService.KEY_MESSAGE, "").orEmpty())
+    }
+
+    override fun onStop() {
+        if (receiverRegistered) {
+            unregisterReceiver(syncStatusReceiver)
+            receiverRegistered = false
+        }
+        super.onStop()
+    }
+
     override fun onDestroy() { worker.shutdownNow(); super.onDestroy() }
+
+    companion object {
+        private const val NOTIFICATION_PERMISSION_REQUEST = 701
+    }
 }

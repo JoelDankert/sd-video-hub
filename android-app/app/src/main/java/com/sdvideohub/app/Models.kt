@@ -17,8 +17,18 @@ object ManifestCodec {
         }.also { entries -> require(entries.map { it.url }.distinct().size == entries.size) { "Duplicate manifest URL" } }
     }
 
-    fun changed(local: Map<String, String>, remote: List<ManifestEntry>) =
-        remote.filter { local[it.url] != it.version }
+}
+
+data class SyncPlan(val downloads: List<ManifestEntry>, val validUrls: Set<String>)
+
+object SyncPlanner {
+    fun plan(local: Map<String, String>, remote: List<ManifestEntry>): SyncPlan {
+        val remoteUrls = remote.mapTo(linkedSetOf()) { it.url }
+        return SyncPlan(
+            downloads = remote.filter { local[it.url] != it.version },
+            validUrls = remoteUrls,
+        )
+    }
 }
 
 data class ByteRange(val start: Long, val endInclusive: Long) {

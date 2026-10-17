@@ -10,9 +10,18 @@
   Drone SVG, updated the MIT attribution, and regenerated adaptive and legacy assets.
 - Moved the WebView synchronization indicator to the bottom-right with a 12 dp margin
   plus the system bottom inset.
+- Replaced Activity-owned cache synchronization with a non-exported foreground data-sync
+  service, compact progress notification, duplicate-run guard, lifecycle-safe status
+  broadcasts, Android 13 notification permission handling, and retry-on-open behavior.
+- Extracted deterministic manifest/cache planning and added JVM coverage for changed,
+  new, unchanged, and stale entries.
 
 ## Verification (2026-10-17)
 
+- `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks
+  (8 executed, 33 up-to-date) after the final foreground-sync changes.
+- Updated APK: `app/build/outputs/apk/debug/app-debug.apk`, 2,676,828 bytes,
+  SHA-256 `f1df0ffe184dd25eeafc4f44e5496c2a6122ee74daad5e0d51fe8ae689174321`.
 - `python3 -m unittest -v test_offline_manifest.py`: **passed**, 2 tests.
 - `python3 -m py_compile app.py test_offline_manifest.py`: **passed**.
 - `./gradlew --no-daemon testDebugUnitTest assembleDebug`: **passed**, 41 tasks

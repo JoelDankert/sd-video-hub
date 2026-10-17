@@ -94,6 +94,8 @@ assets/templates/
 **/spikes/
 **/test/
 **/tests/
+!android-app/app/src/test/
+!android-app/app/src/test/**
 test_*.py
 !test_offline_manifest.py
 *_test.py
