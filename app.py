@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-import argparse,base64,datetime,hashlib,json,mimetypes,os,shutil,signal,sqlite3,statistics,subprocess,tempfile,threading,time,urllib.parse
+import argparse,base64,datetime,hashlib,json,math,mimetypes,os,shutil,signal,sqlite3,statistics,subprocess,tempfile,threading,time,urllib.parse
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import re
 import fcntl
+from collections import deque
 from pathlib import Path
 from hub_config import load_config, video_policy
 from flight_downloads import FlightDownloads
-ROOT=Path(__file__).resolve().parent; DATA=Path(os.environ.get('SDH_DATA',str(ROOT/'data'))); LIB=DATA/'library'; STAGE=DATA/'staging'; THUMBS=DATA/'thumbs'; DB=DATA/'state.sqlite3'; CUTLIST=LIB/'.flight-skip.json'; EXTS={'.mp4','.mov','.m4v','.avi','.mkv','.mts','.m2ts','.3gp','.webm','.ts'}; STOP=threading.Event(); LOCK=threading.RLock(); LIVE_LOCK=threading.Lock(); DEVICE_STATUS={}
+ROOT=Path(__file__).resolve().parent; DATA=Path(os.environ.get('SDH_DATA',str(ROOT/'data'))); LIB=DATA/'library'; STAGE=DATA/'staging'; THUMBS=DATA/'thumbs'; DB=DATA/'state.sqlite3'; CUTLIST=LIB/'.flight-skip.json'; IMPORT_PAUSED=DATA/'.import-paused'; EXTS={'.mp4','.mov','.m4v','.avi','.mkv','.mts','.m2ts','.3gp','.webm','.ts'}; STOP=threading.Event(); LOCK=threading.RLock(); LIVE_LOCK=threading.Lock(); DEVICE_STATUS={}
 DOWNLOADS=None
 def downloads():
  global DOWNLOADS
@@ -150,31 +151,52 @@ def analyse_flight(fid,out):
  except Exception as e:update('files',fid,cut_status='error',error=('cut analysis: '+str(e))[:1000])
 def compress(fid,src,out,thumb):
  try:
-  out.parent.mkdir(parents=True,exist_ok=True); d=probe_duration(src)
-  if not d:
-   update('files',fid,status='skipped',compress_progress=100,cut_status='skipped',cut_progress=100,error=None); return
-  if shutil.which('ffmpeg'):
-   tmp=out.with_suffix('.partial.mp4'); p=subprocess.Popen(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(src),'-map_metadata','-1','-vf','scale=in_range=full:out_range=tv,format=yuv420p','-c:v','libx264','-preset','medium','-crf','28','-pix_fmt','yuv420p','-color_range','tv','-profile:v','high','-level:v','4.0','-c:a','aac','-b:a','128k','-movflags','+faststart','-progress','pipe:1','-nostats',str(tmp)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-   while True:
-    line=p.stdout.readline()
-    if not line and p.poll() is not None:break
-    if line.startswith('out_time_ms=') and d:
-     try:update('files',fid,compress_progress=min(99.0,float(line.split('=',1)[1])/1e6/d*100))
-     except ValueError:pass
-   err=p.stderr.read()[-2000:]; rc=p.wait()
-   if rc:raise RuntimeError(err or 'ffmpeg failed')
-   tmp.replace(out)
-  else:shutil.copy2(src,out)
-  make_thumb(out,thumb); update('files',fid,status='done',compress_progress=100,duration=probe_duration(out),error=None)
+  if not src.is_file():raise FileNotFoundError('staged source is missing; encoding not started: '+str(src))
+  if src.stat().st_size==0:
+   update('files',fid,status='skipped',compress_progress=100,cut_status='skipped',cut_progress=100,error='empty staged source; original retained'); return
+  ffmpeg=shutil.which('ffmpeg')
+  if not ffmpeg:raise RuntimeError('ffmpeg is unavailable; original retained in staging')
+  out.parent.mkdir(parents=True,exist_ok=True); d=probe_duration(src); tmp_fd,tmp_name=tempfile.mkstemp(prefix=out.stem+'.',suffix='.partial.mp4',dir=out.parent); os.close(tmp_fd); tmp=Path(tmp_name)
+  p=subprocess.Popen([ffmpeg,'-hide_banner','-loglevel','error','-y','-i',str(src),'-map_metadata','-1','-vf','scale=in_range=full:out_range=tv,format=yuv420p','-c:v','libx264','-preset','medium','-crf','28','-pix_fmt','yuv420p','-color_range','tv','-profile:v','high','-level:v','4.0','-c:a','aac','-b:a','128k','-movflags','+faststart','-progress','pipe:1','-nostats',str(tmp)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,errors='replace')
+  stderr_tail=deque(maxlen=8)
+  def drain_stderr():
+   try:
+    while True:
+     chunk=p.stderr.read(4096)
+     if not chunk:break
+     stderr_tail.append(chunk)
+   finally:p.stderr.close()
+  stderr_reader=threading.Thread(target=drain_stderr,daemon=True); stderr_reader.start()
+  while True:
+   line=p.stdout.readline()
+   if not line and p.poll() is not None:break
+   if line.startswith('out_time_ms=') and math.isfinite(d) and d>0:
+    try:update('files',fid,compress_progress=min(99.0,float(line.split('=',1)[1])/1e6/d*100))
+    except ValueError:pass
+  rc=p.wait(); stderr_reader.join(); err=''.join(stderr_tail)[-2000:].strip()
+  if rc:
+   diagnostic=err or 'ffmpeg failed'
+   input_error=any(x in diagnostic.lower() for x in ('moov atom not found','invalid data found when processing input')) and not any(x in diagnostic.lower() for x in ('no space left on device','permission denied','cannot allocate memory','error opening output','error while opening encoder','error initializing output','error writing trailer'))
+   if input_error:
+    update('files',fid,status='skipped',compress_progress=100,cut_status='skipped',cut_progress=100,error=('ffmpeg input error; original retained in staging: '+diagnostic)[:1000]); return
+   raise RuntimeError('ffmpeg failed; original retained in staging: '+diagnostic)
+  duration=probe_duration(tmp)
+  if not tmp.is_file() or tmp.stat().st_size<=0 or not math.isfinite(duration) or duration<=0:raise RuntimeError('ffmpeg produced invalid output; original retained in staging')
+  tmp.replace(out)
+  make_thumb(out,thumb); update('files',fid,status='done',compress_progress=100,duration=duration,error=None)
   analyse_flight(fid,out)
  except Exception as e:update('files',fid,status='error',error=str(e)[:1000])
 def clear_and_compress(session):
  with LOCK:
   c=db(); s=c.execute('SELECT * FROM sessions WHERE id=?',(session,)).fetchone(); files=c.execute('SELECT * FROM files WHERE session=?',(session,)).fetchall(); c.close()
  if not s or s['status']!='awaiting_clear': return
+ if IMPORT_PAUSED.exists():
+  update('sessions',session,error='import paused; SD card was not cleared'); return
  if s['copied_bytes']!=s['total_bytes'] or any(not Path(f['staging']).is_file() or Path(f['staging']).stat().st_size!=Path(f['source']).stat().st_size for f in files):
   update('sessions',session,status='error',error='copy verification failed; SD card was not cleared'); return
  try:
+  if IMPORT_PAUSED.exists():
+   update('sessions',session,error='import paused; SD card was not cleared'); return
   mp=Path(s['mount']); [shutil.rmtree(x) if x.is_dir() else x.unlink() for x in mp.iterdir()]; r=run(['udisksctl','unmount','-b',s['device']])
   if r.returncode: r=run(['umount',str(mp)])
   if r.returncode: raise RuntimeError('unmount failed: '+r.stderr[-500:])
@@ -187,8 +209,8 @@ def compress_session(session):
   if f['status'] in ('done','skipped'):continue
   update('files',f['id'],status='compressing'); compress(f['id'],Path(f['staging']),Path(f['output']),Path(f['thumb']))
  with LOCK:
-  c=db(); bad=c.execute("SELECT COUNT(*) n FROM files WHERE session=? AND status NOT IN ('done','skipped')",(session,)).fetchone()['n']; c.execute('UPDATE sessions SET status=?,finished=? WHERE id=?',('error' if bad else 'done',time.time(),session)); c.commit(); c.close()
- if not bad:
+  c=db(); fresh=c.execute('SELECT * FROM files WHERE session=? ORDER BY id',(session,)).fetchall(); bad=any(f['status'] not in ('done','skipped') for f in fresh); skipped=[f for f in fresh if f['status']=='skipped']; safe_cleanup=bool(fresh) and all(f['status']=='done' and math.isfinite(float(f['duration'] or 0)) and float(f['duration'] or 0)>0 and Path(f['output']).is_file() and Path(f['output']).stat().st_size>0 for f in fresh); warning=('; '.join((f['error'] or ('skipped '+f['name'])) for f in skipped))[:1000] if skipped else None; c.execute('UPDATE sessions SET status=?,finished=?,error=? WHERE id=?',('error' if bad else 'done',time.time(),warning,session)); c.commit(); c.close()
+ if safe_cleanup:
   stage_root=STAGE/session
   if stage_root.parent==STAGE and stage_root.is_dir():shutil.rmtree(stage_root)
 def digest(path):
@@ -202,6 +224,8 @@ def copy_session(dev,mp):
  entries=[p for p in Path(mp).rglob('*') if p.is_file()]; total=sum(p.stat().st_size for p in entries); c.execute('INSERT INTO sessions(id,device,mount,label,status,created,total_bytes) VALUES(?,?,?,?,?,?,?)',(session,dev,mp,label,'copying',time.time(),total)); c.commit()
  for src in entries:
   if STOP.is_set():break
+  while IMPORT_PAUSED.exists():
+   if STOP.wait(4):return
   rel=src.relative_to(mp); stage=base/rel; output=outbase/rel.with_suffix('.mp4') if src.suffix.lower() in EXTS else outbase/rel; thumb=THUMBS/session/(str(rel.with_suffix('.jpg')).replace('/','_')) if src.suffix.lower() in EXTS else ''
   stage.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,stage); size=src.stat().st_size
   if stage.stat().st_size!=size or (src.suffix.lower() in EXTS and digest(src)!=digest(stage)): raise IOError('copy verification failed for '+str(src))
@@ -213,6 +237,7 @@ def copy_session(dev,mp):
 def watcher():
  seen=set()
  while not STOP.wait(4):
+  if IMPORT_PAUSED.exists():continue
   current_parts=parts(lsblk()); reconcile_device_status(current_parts)
   for p in current_parts:
    if not p.get('path') or p['path'] in seen:continue
@@ -371,9 +396,11 @@ class H(BaseHTTPRequestHandler):
   if self.path!='/api/clear':return self.js({'error':'not found'},404)
   n=int(self.headers.get('Content-Length','0'));d=json.loads(self.rfile.read(n) or b'{}'); session=d.get('session');c=db();s=c.execute('SELECT * FROM sessions WHERE id=?',(session,)).fetchone();fs=c.execute('SELECT status FROM files WHERE session=?',(session,)).fetchall();c.close()
   if not s:return self.js({'error':'unknown session'},404)
+  if IMPORT_PAUSED.exists():return self.js({'error':'import paused; SD card was not cleared'},409)
   if s['status']!='awaiting_clear' or any(x['status']!='copied' for x in fs):return self.js({'error':'copy phase is not complete'},409)
   if d.get('confirm')!='CLEAR '+session:return self.js({'error':'exact confirmation required'},400)
   try:
+   if IMPORT_PAUSED.exists():return self.js({'error':'import paused; SD card was not cleared'},409)
    mp=Path(s['mount']);[shutil.rmtree(x) if x.is_dir() else x.unlink() for x in mp.iterdir()];r=run(['udisksctl','unmount','-b',s['device']]);
    if r.returncode:return self.js({'error':'unmount failed: '+r.stderr[-500:]},500)
    c=db();c.execute('UPDATE sessions SET status=? WHERE id=?',('compressing',session));c.commit();c.close();threading.Thread(target=compress_session,args=(session,),daemon=True).start();return self.js({'ok':True})
