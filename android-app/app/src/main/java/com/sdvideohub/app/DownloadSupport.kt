@@ -53,15 +53,17 @@ object DownloadRouting {
 object SettingsBootstrap {
     const val CROP = "sd-video-hub.crop-4-3.v1"
     const val SKIP = "sd-video-hub.skip-nonflight.v1"
-    val keys = setOf(CROP, SKIP)
+    const val HIDE_SHORT = "sd-video-hub.hide-short-flights.v1"
+    val keys = setOf(CROP, SKIP, HIDE_SHORT)
 
     fun script(nativeValuesJson: String): String = """
         (()=>{if(location.origin!==__SDH_ORIGIN__)return;
         const readSaved=()=>typeof SDHNative.loadSettings==='function'?JSON.parse(SDHNative.loadSettings(location.origin)):$nativeValuesJson;
         const saved=readSaved();
-        for(const key of [${js(CROP)},${js(SKIP)}]){try{const value=saved[key],old=localStorage.getItem(key);if(value==='true'||value==='false')localStorage.setItem(key,value);else if(old==='true'||old==='false')SDHNative.saveSetting(location.origin,key,old);}catch(_){}}
-        document.addEventListener('DOMContentLoaded',()=>{const latest=readSaved();for(const [id,key] of [['crop-toggle',${js(CROP)}],['skip-toggle',${js(SKIP)}]]){const value=latest[key],x=document.getElementById(id);if(x&&(value==='true'||value==='false')){x.checked=value==='true';x.dispatchEvent(new Event('change',{bubbles:true}));}}});
-        document.addEventListener('change',e=>{const x=e.target;if(x&&x.type==='checkbox'&&(x.id==='crop-toggle'||x.id==='skip-toggle'))SDHNative.saveSetting(location.origin,x.id==='crop-toggle'?${js(CROP)}:${js(SKIP)},String(x.checked));},true);
+        for(const key of [${js(CROP)},${js(SKIP)},${js(HIDE_SHORT)}]){try{const value=saved[key],old=localStorage.getItem(key);if(value==='true'||value==='false')localStorage.setItem(key,value);else if(old==='true'||old==='false')SDHNative.saveSetting(location.origin,key,old);}catch(_){}}
+        const settings=[['crop-toggle',${js(CROP)}],['skip-toggle',${js(SKIP)}],['hide-short-toggle',${js(HIDE_SHORT)}]];
+        document.addEventListener('DOMContentLoaded',()=>{const latest=readSaved();for(const [id,key] of settings){const value=latest[key],x=document.getElementById(id);if(x&&(value==='true'||value==='false')){x.checked=value==='true';x.dispatchEvent(new Event('change',{bubbles:true}));}}});
+        document.addEventListener('change',e=>{const x=e.target,item=x&&settings.find(([id])=>id===x.id);if(x&&x.type==='checkbox'&&item)SDHNative.saveSetting(location.origin,item[1],String(x.checked));},true);
         document.addEventListener('click',e=>{const a=e.target&&e.target.closest?e.target.closest('a[download]'):null;if(!a)return;if(SDHNative.captureDownload(location.origin,a.href)){e.preventDefault();e.stopImmediatePropagation();}},true);
         })();
     """.trimIndent()

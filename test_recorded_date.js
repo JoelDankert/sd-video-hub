@@ -25,4 +25,7 @@ for(const row of [
 assert.equal(videoDetails({...base,recorded_source:'filesystem'}),'1:05 / 2:05 · 2.0 MB · MP4');
 assert.notEqual(galleryKey([base]),galleryKey([{...base,recorded_at:base.recorded_at+1}]));
 assert.notEqual(galleryKey([base]),galleryKey([{...base,recorded_source:'filesystem'}]));
+const legacy={...base,skip_intervals:undefined};
+assert.equal(typeof galleryKey([legacy]),'string');
+assert.notEqual(galleryKey([legacy]),galleryKey([legacy],{'hdz_0000.mp4':[[1,2]]}));
 console.log('recorded-date regression: all assertions passed');
