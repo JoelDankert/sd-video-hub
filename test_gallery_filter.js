@@ -9,7 +9,7 @@ const {chromium}=require('playwright');
 const source=fs.readFileSync(path.join(__dirname,'index.html'),'utf8');
 const html=source.replace('__SDH_CUTLIST__',JSON.stringify('cutlist.json'));
 const file=(id,flight,extra={})=>({id,name:`stale-${id}.avi`,output:`/srv/archive/library/import-${id}/DCIM/100HDZRO/real-${id}.mp4`,status:'done',duration:10,flight_duration:flight,output_size:id*1000,video_url:`/media/${id}.mp4`,thumb_url:'',skip_intervals:[],...extra});
-const files=[file(1,0),file(2,49.999),file(3,50),file(4,51),file(5,null,{duration:1}),file(6,undefined,{duration:2}),file(7,-1),file(8,'invalid'),file(22,60,{output:'/srv/archive/library/20261015-100409-sd-video/DCIM/100HDZRO/hdz_0003.mp4',video_url:'/media/id22.mp4'}),file(110,70,{output:'/srv/archive/library/20261018-183647-sd-video-0403-0201/DCIM/100HDZRO/hdz_0003.mp4',video_url:'/media/id110.mp4'})];
+const files=[file(1,0),file(2,29.999),file(3,30),file(4,31),file(5,null,{duration:1}),file(6,undefined,{duration:2}),file(7,-1),file(8,'invalid'),file(22,60,{output:'/srv/archive/library/20261015-100409-sd-video/DCIM/100HDZRO/hdz_0003.mp4',video_url:'/media/id22.mp4'}),file(110,70,{output:'/srv/archive/library/20261018-183647-sd-video-0403-0201/DCIM/100HDZRO/hdz_0003.mp4',video_url:'/media/id110.mp4'})];
 const state={files,sessions:[],devices:[],settings:{archive:{sort_direction:'asc'},playback:{skip_nonflight:true,crop_4_3:false}}};
 
 async function serve(page){
@@ -30,7 +30,7 @@ async function serve(page){
     assert.equal(await toggle.isChecked(),false,'filter defaults off');
     assert.equal(await page.locator('.video').count(),files.length,'off shows every completed video');
     await toggle.check();
-    assert.equal(await page.locator('.video').count(),files.length-2,'only recognized flight durations from 0 through under 50 are hidden');
+    assert.equal(await page.locator('.video').count(),files.length-2,'only recognized flight durations from 0 through strictly under 30 are hidden');
     assert.match(await page.locator('#count').textContent(),/8 Videos/);assert.match(await page.locator('#count').textContent(),/165 KB/);
     assert.ok(await page.getByText('real-5.mp4',{exact:true}).isVisible(),'unknown flight duration remains visible despite short total duration');
     await page.evaluate(()=>{window.__galleryNode=document.querySelector('.video')});await page.waitForTimeout(1800);
