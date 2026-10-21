@@ -52,7 +52,15 @@ def mount(p):
   if ' at ' in x:
    mp=x.rsplit(' at ',1)[1].rstrip('.').strip(); DEVICE_STATUS[p['path']]={'path':p['path'],'size':p.get('size'),'state':'mounted','mount':mp,'error':''}; return mp
  DEVICE_STATUS[p['path']]={'path':p['path'],'size':p.get('size'),'state':'detected','mount':'','error':(r.stderr or 'mount failed').strip()[-300:]}; return None
-def sid(dev,mp):return hashlib.sha256((dev+'|'+mp).encode()).hexdigest()[:16]
+def source_inventory(mp):
+ inventory=[]
+ for path in Path(mp).rglob('*'):
+  if path.is_file():
+   stat=path.stat(); inventory.append((str(path.relative_to(mp)),stat.st_size,stat.st_mtime_ns,path))
+ return sorted(inventory,key=lambda item:item[0])
+def sid(dev,mp,inventory):
+ identity=json.dumps([dev,mp,[[rel,size,mtime_ns] for rel,size,mtime_ns,_ in inventory]],ensure_ascii=False,separators=(',',':'))
+ return hashlib.sha256(identity.encode()).hexdigest()[:16]
 def reconcile_device_status(current_parts):
  active={p.get('path') for p in current_parts if p.get('path')}
  with LOCK:
@@ -210,7 +218,7 @@ def compress_session(session):
   update('files',f['id'],status='compressing'); compress(f['id'],Path(f['staging']),Path(f['output']),Path(f['thumb']))
  with LOCK:
   c=db(); fresh=c.execute('SELECT * FROM files WHERE session=? ORDER BY id',(session,)).fetchall(); bad=any(f['status'] not in ('done','skipped') for f in fresh); skipped=[f for f in fresh if f['status']=='skipped']; safe_cleanup=bool(fresh) and all(f['status']=='done' and math.isfinite(float(f['duration'] or 0)) and float(f['duration'] or 0)>0 and Path(f['output']).is_file() and Path(f['output']).stat().st_size>0 for f in fresh); warning=('; '.join((f['error'] or ('skipped '+f['name'])) for f in skipped))[:1000] if skipped else None; c.execute('UPDATE sessions SET status=?,finished=?,error=? WHERE id=?',('error' if bad else 'done',time.time(),warning,session)); c.commit(); c.close()
- if safe_cleanup:
+ if safe_cleanup and os.environ.get('SDH_KEEP_ORIGINALS','1')=='0':
   stage_root=STAGE/session
   if stage_root.parent==STAGE and stage_root.is_dir():shutil.rmtree(stage_root)
 def digest(path):
@@ -219,10 +227,10 @@ def digest(path):
   for chunk in iter(lambda:r.read(1024*1024),b''):h.update(chunk)
  return h.hexdigest()
 def copy_session(dev,mp):
- session=sid(dev,mp); label=''.join(c if c.isalnum() or c in '._-' else '_' for c in Path(mp).name)[:60]; base=STAGE/session; outbase=LIB/(time.strftime('%Y%m%d-%H%M%S')+'-'+label); c=db()
+ inventory=source_inventory(mp); session=sid(dev,mp,inventory); label=''.join(c if c.isalnum() or c in '._-' else '_' for c in Path(mp).name)[:60]; base=STAGE/session; outbase=LIB/(time.strftime('%Y%m%d-%H%M%S')+'-'+label); c=db()
  if c.execute('SELECT id FROM sessions WHERE id=?',(session,)).fetchone():c.close();return
- entries=[p for p in Path(mp).rglob('*') if p.is_file()]; total=sum(p.stat().st_size for p in entries); c.execute('INSERT INTO sessions(id,device,mount,label,status,created,total_bytes) VALUES(?,?,?,?,?,?,?)',(session,dev,mp,label,'copying',time.time(),total)); c.commit()
- for src in entries:
+ total=sum(size for _,size,_,_ in inventory); c.execute('INSERT INTO sessions(id,device,mount,label,status,created,total_bytes) VALUES(?,?,?,?,?,?,?)',(session,dev,mp,label,'copying',time.time(),total)); c.commit()
+ for _,_,_,src in inventory:
   if STOP.is_set():break
   while IMPORT_PAUSED.exists():
    if STOP.wait(4):return
@@ -238,7 +246,7 @@ def watcher():
  seen=set()
  while not STOP.wait(4):
   if IMPORT_PAUSED.exists():continue
-  current_parts=parts(lsblk()); reconcile_device_status(current_parts)
+  current_parts=parts(lsblk()); reconcile_device_status(current_parts); seen.intersection_update(p.get('path') for p in current_parts if p.get('path'))
   for p in current_parts:
    if not p.get('path') or p['path'] in seen:continue
    mp=mount(p)
